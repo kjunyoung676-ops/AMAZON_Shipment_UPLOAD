@@ -21,7 +21,7 @@ const MASTER_INIT: Record<string, MasterItem> = {
   "HS124018Z-5W":     {sku:"HK124018Z-5W-1Pack",             asin:"B0BYJ6C1PG", to:"H3",  loc:"J-10-W", cpp:16, fba:1756, price:20300, kg:31.44, bx:125,  by:41.5, bz:12.5},
   "HS604015W-5B":     {sku:"HS604015W-5B-JP",                asin:"B0CTKFC5LR", to:"H4",  loc:"J-12-B", cpp:24, fba:1020, price:14800, kg:12.90, bx:80,   by:41.5, bz:13  },
   "HS604015W-5W":     {sku:"HS604015W-5W-JAPAN",             asin:"B0CWQ8QX1Y", to:"H11", loc:"J-12-W", cpp:24, fba:1100, price:14800, kg:20.00, bx:80,   by:41.5, bz:13  },
-  "HS904016.5W-5B":   {sku:"HS9040165W-5B-JP",              asin:"B0CTKDFQ47", to:"H5",  loc:"J-13-B", cpp:16, fba:1532, price:18800, kg:27.20, bx:42,   by:96,   bz:13  },
+  "HS904016.5W-5B":   {sku:"HS9040165W-5B-JP",               asin:"B0CTKDFQ47", to:"H5",  loc:"J-13-B", cpp:16, fba:1532, price:18800, kg:27.20, bx:42,   by:96,   bz:13  },
   "HS904016.5W-5W":   {sku:"HS904016.5W-5W-JAPAN",           asin:"B0CWQF2XC9", to:"H12", loc:"J-13-W", cpp:16, fba:1532, price:18800, kg:27.20, bx:96,   by:42,   bz:13  },
   "HS124518W-5B":     {sku:"HS124518W-5B-JAPAN",             asin:"B0CWQ9X3QB", to:"H10", loc:"J-14-B", cpp:16, fba:1756, price:22300, kg:35.30, bx:125,  by:47,   bz:13.5},
   "HS124518W-5W":     {sku:"HS124518W-5W-JAPAN",             asin:"B0CWQGKPMG", to:"H13", loc:"J-14-W", cpp:16, fba:1756, price:22300, kg:35.30, bx:125,  by:47,   bz:13.5},
@@ -143,7 +143,6 @@ function forwardFill(rows: RowData[]): RowData[] {
     }
     row.container_no = ctnNo
   }
-  console.log("[v0] forwardFill 결과: 총", res.length, "행, 컨번호별:", res.reduce((acc,r) => { const k=String(r.container_no); acc[k]=(acc[k]||0)+1; return acc }, {} as Record<string,number>))
   return res
 }
 
@@ -162,17 +161,22 @@ export default function ShipmentApp() {
   const [activeSheet, setAs] = useState<string|null>(null)
   const [file, setFile]      = useState<File|null>(null)
   const [mode, setMode]      = useState('1')
-  const [master, setMaster]  = useState<Record<string, MasterItem>>(() => {
-    const m = Object.fromEntries(Object.entries(MASTER_INIT).map(([k,v]) => [k,{...v}]))
-    console.log("[v0] master init 첫번째 항목:", Object.entries(m)[0])
-    return m
-  })
+  const [master, setMaster]  = useState<Record<string, MasterItem>>(() =>
+    Object.fromEntries(Object.entries(MASTER_INIT).map(([k,v]) => [k,{...v}]))
+  )
   const [s2meta, setS2meta]    = useState<Record<string, Record<string,string>>>({})
   const [ctnMeta, setCtnMeta]  = useState<Record<number, Record<string,string>>>({})
   const [coll, setColl]        = useState<Record<string, boolean>>({})
   const [newSku, setNewSku]    = useState({...EMPTY_SKU})
   const [fbaLoading, setFbaLoading] = useState(false)
-  const fileRef = useRef<HTMLInputElement>(null)
+  // ── 라벨 분류 state ──
+  const [labelFiles, setLabelFiles]     = useState<File[]>([])
+  const [labelGroups, setLabelGroups]   = useState<Record<string, Uint8Array>>({})
+  const [labelCounts, setLabelCounts]   = useState<Record<string, number>>({})
+  const [labelLoading, setLabelLoading] = useState(false)
+  const [labelStatus, setLabelStatus]   = useState("")
+  const fileRef  = useRef<HTMLInputElement>(null)
+  const labelRef = useRef<HTMLInputElement>(null)
 
   // ── 파생 데이터 ────────────────────────────────────────
   const raw = (activeSheet && sheets[activeSheet]) || []
@@ -213,17 +217,17 @@ export default function ShipmentApp() {
       const meta = s2meta[sku] || {}
       return {
         sku, total, cpp,
-        asin:    m.asin    || "",
-        to:      m.to      || "",
-        loc:     m.loc     || "",
-        pallets: Math.ceil(total / cpp),
-        pages:   parseFloat((total/6).toFixed(2)),
-        gw:      calcGW(total, parseFloat(String(m.kg))||0),
-        cbm:     calcCBM(total, parseFloat(String(m.bx))||0, parseFloat(String(m.by))||0, parseFloat(String(m.bz))||0),
-        fc:      meta.fc       || "",
-        address: meta.address  || "",
-        fbaId:   meta.fbaId    || "",
-        amazonId:meta.amazonId || "",
+        asin:     m.asin    || "",
+        to:       m.to      || "",
+        loc:      m.loc     || "",
+        pallets:  Math.ceil(total / cpp),
+        pages:    parseFloat((total/6).toFixed(2)),
+        gw:       calcGW(total, parseFloat(String(m.kg))||0),
+        cbm:      calcCBM(total, parseFloat(String(m.bx))||0, parseFloat(String(m.by))||0, parseFloat(String(m.bz))||0),
+        fc:       meta.fc       || "",
+        address:  meta.address  || "",
+        fbaId:    meta.fbaId    || "",
+        amazonId: meta.amazonId || "",
       }
     })
   }
@@ -260,7 +264,7 @@ export default function ShipmentApp() {
     return <span style={{fontSize:12,opacity:0.85}}><span style={{opacity:0.6,marginRight:2}}>{l}</span>{String(v)}</span>
   }
 
-  // ── 익스포트 ───────────���──────────────────────────────
+  // ── 익스포트 ──────────────────────────────────────────
   function expS1() {
     xlsDl(fd.map(r => ({
       시트:activeSheet, 컨:"컨"+r.container_no,
@@ -304,70 +308,155 @@ export default function ShipmentApp() {
     xlsDl([...hdr,...body], activeSheet||"S3", "2차가공_"+(activeSheet||"data")+".xlsx")
   }
 
-async function expFbaUpload() {
-  setFbaLoading(true)
-  try {
-    const res = await fetch("/UPLOAD_FORMAT.xlsx")
-    if (!res.ok) throw new Error("파일 로드 실패 (" + res.status + ")")
-    const buf = await res.arrayBuffer()
-    const wb = XLSX.read(buf, {
-      type: "array", cellStyles: true, cellNF: true,
-      cellDates: true, sheetStubs: true,
-    })
-    const templateSheetName = wb.SheetNames.find(n => n.toLowerCase().includes("template"))
-    if (!templateSheetName) throw new Error("template 시트를 찾을 수 없습니다. 시트 목록: " + wb.SheetNames.join(", "))
-    const ws = wb.Sheets[templateSheetName]
-    const rows = buildS2rows()
-    rows.forEach((r, i) => {
-      const row = 9 + i
-      const m = master[r.sku] || ({} as MasterItem)
-      const realSku = m.sku || r.sku
-      const set = (col: string, t: "s"|"n", v: string|number) => {
-        ws[col + row] = { ...(ws[col + row] || {}), t, v, w: String(v) }
+  // ── FBA 업로드 양식 ────────────────────────────────────
+  async function expFbaUpload() {
+    setFbaLoading(true)
+    try {
+      const res = await fetch("/UPLOAD_FORMAT.xlsx")
+      if (!res.ok) throw new Error("파일 로드 실패 (" + res.status + ")")
+      const buf = await res.arrayBuffer()
+      const wb = XLSX.read(buf, { type:"array", cellStyles:true, cellNF:true, cellDates:true, sheetStubs:true })
+      const tplName = wb.SheetNames.find(n => n.toLowerCase().includes("template"))
+      if (!tplName) throw new Error("template 시트를 찾을 수 없습니다: " + wb.SheetNames.join(", "))
+      const ws = wb.Sheets[tplName]
+      const rows = buildS2rows()
+      rows.forEach((r, i) => {
+        const row = 9 + i
+        const m = master[r.sku] || ({} as MasterItem)
+        const realSku = m.sku || r.sku
+        const set = (col: string, t: "s"|"n", v: string|number) => {
+          ws[col + row] = { ...(ws[col + row] || {}), t, v, w: String(v) }
+        }
+        set("A", "s", realSku)
+        set("B", "n", r.total)
+        set("F", "n", 1)
+        set("G", "n", 1)
+        set("H", "n", m.bx || 0)
+        set("I", "n", m.by || 0)
+        set("J", "n", m.bz || 0)
+        set("K", "n", m.kg || 0)
+      })
+      if (rows.length > 0) {
+        const decoded = XLSX.utils.decode_range(ws["!ref"] || "A1:K8")
+        decoded.e.r = Math.max(decoded.e.r, 8 + rows.length - 1)
+        decoded.e.c = Math.max(decoded.e.c, 10)
+        ws["!ref"] = XLSX.utils.encode_range(decoded)
       }
-      set("A", "s", realSku)
-      set("B", "n", r.total)
-      set("F", "n", 1)
-      set("G", "n", 1)
-      set("H", "n", m.bx || 0)
-      set("I", "n", m.by || 0)
-      set("J", "n", m.bz || 0)
-      set("K", "n", m.kg || 0)
-    })
-    if (rows.length > 0) {
-      const currentRef = ws["!ref"] || "A1:K8"
-      const decoded = XLSX.utils.decode_range(currentRef)
-      decoded.e.r = Math.max(decoded.e.r, 8 + rows.length - 1)
-      decoded.e.c = Math.max(decoded.e.c, 10)
-      ws["!ref"] = XLSX.utils.encode_range(decoded)
+      XLSX.writeFile(wb, "UPLOAD_FORMAT_filled.xlsx", { cellStyles:true, compression:true })
+    } catch (e) {
+      alert("오류: " + (e as Error).message)
+    } finally {
+      setFbaLoading(false)
     }
-    XLSX.writeFile(wb, "UPLOAD_FORMAT_filled.xlsx", { cellStyles: true, compression: true })
-  } catch (e) {
-    alert("오류: " + (e as Error).message)
-  } finally {
-    setFbaLoading(false)
   }
-}
 
-    // ← 핵심 수정: !ref 범위를 실제 데이터 행 수만큼 확장
-    if (rows.length > 0) {
-      const lastDataRow = 9 + rows.length - 1  // 0-indexed 아님, xlsx 행번호
-      const currentRef = ws["!ref"] || "A1:B8"
-      const decoded = XLSX.utils.decode_range(currentRef)
-      decoded.e.r = Math.max(decoded.e.r, lastDataRow - 1)  // decode_range는 0-indexed
-      ws["!ref"] = XLSX.utils.encode_range(decoded)
+  // ── 라벨 PDF 분류 ──────────────────────────────────────
+  async function processLabels(files: File[]) {
+    setLabelLoading(true)
+    setLabelGroups({})
+    setLabelCounts({})
+    setLabelStatus("라이브러리 로딩 중...")
+    try {
+      // realSku → loc 역매핑 구성
+      const skuToLoc: Record<string, string> = {}
+      for (const m of Object.values(master)) {
+        if (m.sku && m.loc) skuToLoc[m.sku] = m.loc
+      }
+
+      // pdfjs 동적 로드
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const pdfjsLib: any = await import('pdfjs-dist')
+      pdfjsLib.GlobalWorkerOptions.workerSrc =
+        'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+
+      const { PDFDocument } = await import('pdf-lib')
+
+      type PageRef = { srcBytes: ArrayBuffer; pageIdx: number }
+      const locMap: Record<string, PageRef[]> = {}
+
+      let totalPages = 0
+      let processed = 0
+
+      // 전체 페이지 수 먼저 파악
+      for (const f of files) {
+        const bytes = await f.arrayBuffer()
+        const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(bytes) }).promise
+        totalPages += pdf.numPages
+        pdf.destroy()
+      }
+
+      // 각 파일 처리
+      for (const f of files) {
+        const bytes = await f.arrayBuffer()
+        const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(bytes) }).promise
+        for (let i = 0; i < pdf.numPages; i++) {
+          const page = await pdf.getPage(i + 1)
+          const content = await page.getTextContent()
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const text = (content.items as any[]).map((it: any) => it.str).join(' ')
+          let loc: string | null = null
+          for (const [sku, l] of Object.entries(skuToLoc)) {
+            if (sku && text.includes(sku)) { loc = l; break }
+          }
+          if (loc) {
+            if (!locMap[loc]) locMap[loc] = []
+            locMap[loc].push({ srcBytes: bytes, pageIdx: i })
+          }
+          processed++
+          if (processed % 50 === 0 || processed === totalPages) {
+            setLabelStatus(`페이지 분석 중... ${processed}/${totalPages}`)
+          }
+        }
+        pdf.destroy()
+      }
+
+      if (!Object.keys(locMap).length) {
+        alert('매칭된 라벨 없음 — SKU 매핑을 확인하세요.')
+        return
+      }
+
+      setLabelStatus("PDF 생성 중...")
+      const result: Record<string, Uint8Array> = {}
+      const counts: Record<string, number> = {}
+
+      for (const [loc, refs] of Object.entries(locMap)) {
+        counts[loc] = refs.length
+        const outDoc = await PDFDocument.create()
+        // 같은 파일끼리 묶어서 한 번에 복사 (성능 최적화)
+        const fileMap = new Map<ArrayBuffer, number[]>()
+        for (const { srcBytes, pageIdx } of refs) {
+          if (!fileMap.has(srcBytes)) fileMap.set(srcBytes, [])
+          fileMap.get(srcBytes)!.push(pageIdx)
+        }
+        for (const [srcBytes, indices] of fileMap) {
+          const srcDoc = await PDFDocument.load(srcBytes)
+          const pages = await outDoc.copyPages(srcDoc, indices)
+          pages.forEach(p => outDoc.addPage(p))
+        }
+        result[loc] = await outDoc.save()
+      }
+
+      setLabelGroups(result)
+      setLabelCounts(counts)
+      setLabelStatus(`완료 — ${Object.keys(result).length}개 BOX CODE로 분류됨`)
+    } catch (e) {
+      alert('처리 오류: ' + (e as Error).message)
+      setLabelStatus("")
+    } finally {
+      setLabelLoading(false)
     }
-
-    XLSX.writeFile(wb, "UPLOAD_FORMAT_filled.xlsx", {
-      cellStyles: true,
-      compression: true,
-    })
-  } catch (e) {
-    alert("오류: " + (e as Error).message)
-  } finally {
-    setFbaLoading(false)
   }
-}
+
+  function dlLabel(loc: string, bytes: Uint8Array) {
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }))
+    a.download = `${loc}.pdf`
+    a.click()
+  }
+
+  function dlAllLabels() {
+    Object.entries(labelGroups).forEach(([l, b]) => dlLabel(l, b))
+  }
 
   // ── 시트 탭 ────────────────────────────────────────────
   function SheetTabs() {
@@ -402,7 +491,8 @@ async function expFbaUpload() {
   const totCBM = Math.round(s2rows.reduce((s,r) => s+r.cbm, 0)*100)/100
 
   function NavBtn({m, label}: {m:string, label:string}) {
-    const active = mode===m, avail = m==='1'||m==='map'||!!file
+    const active = mode===m
+    const avail = m==='1' || m==='map' || m==='label' || !!file
     return (
       <button onClick={() => avail && setMode(m)} style={{
         padding:"8px 16px", fontSize:12, fontWeight:active?500:400,
@@ -423,6 +513,8 @@ async function expFbaUpload() {
           <NavBtn m="1" label="① 업로드" />
           <div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
           <NavBtn m="2" label="② 1차 가공" />
+          <div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
+          <NavBtn m="label" label="② 라벨 분류" />
           <div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
           <NavBtn m="3" label="③ 2차 가공" />
         </div>
@@ -590,6 +682,115 @@ async function expFbaUpload() {
         </div>
       )}
 
+      {/* ══ 라벨 분류 ══ */}
+      {mode==='label' && (
+        <div>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14,flexWrap:"wrap"}}>
+            <span style={{fontSize:12,color:"var(--color-text-secondary)"}}>
+              FBA 카톤 라벨 PDF → BOX CODE별 분류 출력
+            </span>
+            {Object.keys(labelGroups).length > 0 && (
+              <button
+                onClick={dlAllLabels}
+                style={{marginLeft:"auto",fontSize:11,padding:"3px 12px",background:"var(--color-background-success)",border:"0.5px solid var(--color-border-success)",color:"var(--color-text-success)",borderRadius:"var(--border-radius-md)",cursor:"pointer",fontWeight:500}}
+              >
+                전체 다운로드
+              </button>
+            )}
+          </div>
+
+          {/* 업로드 드롭존 */}
+          <div
+            onClick={() => !labelLoading && labelRef.current?.click()}
+            onDragOver={e => e.preventDefault()}
+            onDrop={e => {
+              e.preventDefault()
+              const fs = Array.from(e.dataTransfer.files).filter(f => f.type === 'application/pdf')
+              if (fs.length && !labelLoading) { setLabelFiles(fs); processLabels(fs) }
+            }}
+            style={{
+              display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
+              padding:"32px",border:"1px dashed var(--color-border-secondary)",
+              borderRadius:"var(--border-radius-md)",cursor:labelLoading?"default":"pointer",
+              marginBottom:16,gap:8,
+              background:labelLoading?"var(--color-background-secondary)":"transparent",
+              transition:"background 0.15s"
+            }}
+          >
+            <span style={{fontSize:32}}>{labelLoading ? "⏳" : "📄"}</span>
+            <span style={{fontSize:13,color:"var(--color-text-secondary)",textAlign:"center"}}>
+              {labelLoading
+                ? labelStatus
+                : labelFiles.length
+                  ? `${labelFiles.length}개 파일 처리 완료 — 다시 업로드하려면 클릭`
+                  : "FBA 카톤 라벨 PDF 업로드 (여러 파일 동시 가능)"}
+            </span>
+            {!labelLoading && (
+              <span style={{fontSize:11,color:"var(--color-text-tertiary)"}}>
+                라벨 내 SKU를 자동으로 인식해 BOX CODE별로 분리합니다
+              </span>
+            )}
+          </div>
+          <input
+            ref={labelRef} type="file" accept="application/pdf" multiple style={{display:"none"}}
+            onChange={e => {
+              const fs = Array.from(e.target.files || [])
+              if (fs.length) { setLabelFiles(fs); processLabels(fs) }
+            }}
+          />
+
+          {/* 결과 테이블 */}
+          {Object.keys(labelGroups).length > 0 && !labelLoading && (
+            <div style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",overflow:"hidden"}}>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                <thead>
+                  <tr>
+                    <th style={TH}>BOX CODE</th>
+                    <th style={{...TH,textAlign:"right"}}>라벨 수</th>
+                    <th style={{...TH,textAlign:"right"}}>파일 크기</th>
+                    <th style={TH}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.entries(labelGroups)
+                    .sort(([a],[b]) => a.localeCompare(b))
+                    .map(([loc, bytes], i) => (
+                    <tr key={loc} style={{background:i%2===0?"transparent":"var(--color-background-secondary)"}}>
+                      <td style={{...TD,fontWeight:500}}>{loc}</td>
+                      <td style={{...TD,textAlign:"right"}}>{(labelCounts[loc]||0).toLocaleString()}장</td>
+                      <td style={{...TD,textAlign:"right",color:"var(--color-text-secondary)"}}>
+                        {(bytes.length / 1024).toFixed(0)}KB
+                      </td>
+                      <td style={TD}>
+                        <button
+                          onClick={() => dlLabel(loc, bytes)}
+                          style={{fontSize:11,padding:"2px 10px",cursor:"pointer",borderRadius:4,
+                            border:"0.5px solid var(--color-border-secondary)",background:"transparent"}}
+                        >
+                          ↓ PDF
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr style={{background:"var(--color-background-secondary)",borderTop:"1.5px solid var(--color-border-secondary)"}}>
+                    <td style={{...TD,fontWeight:500}}>합계</td>
+                    <td style={{...TD,textAlign:"right",fontWeight:500}}>
+                      {Object.values(labelCounts).reduce((s,c)=>s+c,0).toLocaleString()}장
+                    </td>
+                    <td style={{...TD,textAlign:"right",fontWeight:500}}>
+                      {(Object.values(labelGroups).reduce((s,b)=>s+b.length,0)/1024).toFixed(0)}KB
+                    </td>
+                    <td style={TD}></td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ══ STEP 3 ══ */}
       {mode==='3' && (
         <div>
@@ -623,7 +824,6 @@ async function expFbaUpload() {
                       const m=master[String(r.sku)]||({} as MasterItem)
                       return s+calcCBM(r.quantity, parseFloat(String(m.bx))||0, parseFloat(String(m.by))||0, parseFloat(String(m.bz))||0)
                     }, 0)*100)/100
-
                     return [
                       ...rows.map((r,i) => {
                         const m   = master[String(r.sku)] || ({} as MasterItem)
@@ -724,29 +924,25 @@ async function expFbaUpload() {
                   <tr key={sku} style={{background:i%2===0?"transparent":"var(--color-background-secondary)"}}>
                     <td style={{...TD,fontWeight:500,minWidth:130}}>{sku}</td>
                     <td style={{...TD,...IBLU,minWidth:160}}>
-                      <input
-                        value={m.sku ?? ""}
-                        onChange={e => updM(sku,"sku",e.target.value)}
-                        style={{...INP, color: m.sku ? "var(--color-text-primary)" : "var(--color-text-secondary)"}}
-                        placeholder="Merchant SKU"
-                      />
+                      <input value={m.sku ?? ""} onChange={e => updM(sku,"sku",e.target.value)}
+                        style={{...INP,color:m.sku?"var(--color-text-primary)":"var(--color-text-secondary)"}} placeholder="Merchant SKU" />
                     </td>
-                    {(["asin","to","loc"] as const).map((f) => (
+                    {(["asin","to","loc"] as const).map(f => (
                       <td key={f} style={{...TD,...IBLU}}>
                         <input value={m[f]||""} onChange={e => updM(sku,f,e.target.value)} style={INP} />
                       </td>
                     ))}
-                    {(["cpp","fba","price","kg","bx","by","bz"] as const).map((f) => (
+                    {(["cpp","fba","price","kg","bx","by","bz"] as const).map(f => (
                       <td key={f} style={{...TD,...IBLU}}>
                         <input type="number" value={m[f]||0} onChange={e => updM(sku,f,Number(e.target.value))} style={{...INP,textAlign:"right"}} />
                       </td>
                     ))}
                     <td style={TD}>
-                      <button onClick={() => setMaster(p => { const n={...p}; delete n[sku]; return n })} style={{fontSize:11,padding:"1px 6px",cursor:"pointer",borderRadius:4,background:"transparent",color:"var(--color-text-danger)",border:"0.5px solid var(--color-border-danger)"}}>삭제</button>
+                      <button onClick={() => setMaster(p => { const n={...p}; delete n[sku]; return n })}
+                        style={{fontSize:11,padding:"1px 6px",cursor:"pointer",borderRadius:4,background:"transparent",color:"var(--color-text-danger)",border:"0.5px solid var(--color-border-danger)"}}>삭제</button>
                     </td>
                   </tr>
                 ))}
-
               </tbody>
             </table>
           </div>
