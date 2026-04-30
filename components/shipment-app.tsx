@@ -306,26 +306,15 @@ export default function ShipmentApp() {
 
           // fallback: 텍스트 전체에서 「単一のSKU <SKU> 数量」 패턴 추출
           if (labelInfos.length === 0) {
+            const fullText = items.map((it)=>String(it.str||"")).join(" ")
             const re = /単一のSKU\s*([A-Za-z0-9.\-_/]+?)\s*(?:数量|JAN|FBA|$)/g
             const fallbackSkus: string[] = []
             let m: RegExpExecArray | null
-            while ((m = re.exec(fullTextSpaced)) !== null) {
+            while ((m = re.exec(fullText)) !== null) {
               const s = (m[1] || "").trim()
               if (s.length > 4) fallbackSkus.push(s)
             }
-            injectSyntheticLabels(labelInfos, fallbackSkus)
-          }
-
-          // fallback2: marker가 전혀 없어도 페이지 텍스트에서 마스터 realSku를 직접 탐색
-          if (labelInfos.length === 0) {
-            const matchedMasterSkus: string[] = []
-            for (const m of Object.values(master)) {
-              if (!m.sku) continue
-              const norm = normalizeSku(m.sku)
-              if (norm.length < 6) continue
-              if (fullTextNoSpace.toUpperCase().includes(norm)) matchedMasterSkus.push(m.sku)
-            }
-            injectSyntheticLabels(labelInfos, [...new Set(matchedMasterSkus)])
+            fallbackSkus.forEach((sku, idx) => labelInfos.push({ sku, y: 10000 - idx * 40, x: idx % 2 === 0 ? 0 : 1000 }))
           }
 
           if (labelInfos.length === 0) {
@@ -336,7 +325,7 @@ export default function ShipmentApp() {
               skusNorm: [],
               matchedLoc: null,
               labelCount: 0,
-              note: `SKU marker not found on page (textLen=${fullTextNoSpace.length})`,
+              note: "SKU marker not found on page",
             })
             processed++
             continue
