@@ -304,40 +304,50 @@ export default function ShipmentApp() {
     xlsDl([...hdr,...body], activeSheet||"S3", "2차가공_"+(activeSheet||"data")+".xlsx")
   }
 
-  async function expFbaUpload() {
-    setFbaLoading(true)
-    try {
-      const url = "https://kjunyoung676-ops.github.io/AMAZON_Shipment_UPLOAD/UPLOAD_FORMAT.xlsx"
-      const res = await fetch(url)
-      if (!res.ok) throw new Error("파일 로드 실패 (" + res.status + ")")
-      const buf = await res.arrayBuffer()
-      const wb = XLSX.read(buf, {
-        type: "array",
-        cellStyles: true,
-        cellNF: true,
-        cellDates: true,
-        sheetStubs: true,
-      })
-      const templateSheetName = wb.SheetNames.find(n => n.toLowerCase().includes("template"))
-      if (!templateSheetName) throw new Error("template 시트를 찾을 수 없습니다. 시트 목록: " + wb.SheetNames.join(", "))
-      const ws = wb.Sheets[templateSheetName]
-      const rows = buildS2rows()
-      rows.forEach((r, i) => {
-        const row = 9 + i
-        const realSku = master[r.sku]?.sku || r.sku
-        ws["A"+row] = { ...ws["A"+row], t:"s", v:realSku, w:realSku }
-        ws["B"+row] = { ...ws["B"+row], t:"n", v:r.total, w:String(r.total) }
-      })
-      XLSX.writeFile(wb, "UPLOAD_FORMAT_filled.xlsx", {
-        cellStyles: true,
-        compression: true,
-      })
-    } catch(e) {
-      alert("오류: " + (e as Error).message)
-    } finally {
-      setFbaLoading(false)
+ async function expFbaUpload() {
+  setFbaLoading(true)
+  try {
+    const res = await fetch("/UPLOAD_FORMAT.xlsx")  // ← GitHub Pages → 로컬 public/
+    if (!res.ok) throw new Error("파일 로드 실패 (" + res.status + ")")
+    const buf = await res.arrayBuffer()
+    const wb = XLSX.read(buf, {
+      type: "array",
+      cellStyles: true,
+      cellNF: true,
+      cellDates: true,
+      sheetStubs: true,
+    })
+    const templateSheetName = wb.SheetNames.find(n => n.toLowerCase().includes("template"))
+    if (!templateSheetName) throw new Error("template 시트를 찾을 수 없습니다. 시트 목록: " + wb.SheetNames.join(", "))
+    const ws = wb.Sheets[templateSheetName]
+    const rows = buildS2rows()
+
+    rows.forEach((r, i) => {
+      const row = 9 + i
+      const realSku = master[r.sku]?.sku || r.sku
+      ws["A" + row] = { ...(ws["A" + row] || {}), t: "s", v: realSku, w: realSku }
+      ws["B" + row] = { ...(ws["B" + row] || {}), t: "n", v: r.total, w: String(r.total) }
+    })
+
+    // ← 핵심 수정: !ref 범위를 실제 데이터 행 수만큼 확장
+    if (rows.length > 0) {
+      const lastDataRow = 9 + rows.length - 1  // 0-indexed 아님, xlsx 행번호
+      const currentRef = ws["!ref"] || "A1:B8"
+      const decoded = XLSX.utils.decode_range(currentRef)
+      decoded.e.r = Math.max(decoded.e.r, lastDataRow - 1)  // decode_range는 0-indexed
+      ws["!ref"] = XLSX.utils.encode_range(decoded)
     }
+
+    XLSX.writeFile(wb, "UPLOAD_FORMAT_filled.xlsx", {
+      cellStyles: true,
+      compression: true,
+    })
+  } catch (e) {
+    alert("오류: " + (e as Error).message)
+  } finally {
+    setFbaLoading(false)
   }
+}
 
   // ── 시트 탭 ────────────────────────────────────────────
   function SheetTabs() {
