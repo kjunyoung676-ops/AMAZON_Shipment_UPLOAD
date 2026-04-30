@@ -74,6 +74,7 @@ interface LabelDebugEntry {
   skusNorm: string[]         // 정규화된 SKU (매칭 비교용)
   matchedLoc: string | null  // 매칭된 LOC
   labelCount: number
+  note?: string
 }
 
 const calcGW  = (qty:number, nw:number) => Math.trunc(qty*nw*1.01*10)/10
@@ -250,6 +251,10 @@ export default function ShipmentApp() {
       let processed = 0
 
       // 전체 페이지 수
+      const injectSyntheticLabels = (target: { sku: string; y: number; x: number }[], skus: string[]) => {
+        skus.forEach((sku, idx) => target.push({ sku, y: 10000 - idx * 40, x: idx % 2 === 0 ? 0 : 1000 }))
+      }
+
       for (const f of files) {
         const bytes = new Uint8Array(await f.arrayBuffer())
         const pdf = await pdfjsLib.getDocument({ data: bytes.slice() }).promise
@@ -266,9 +271,13 @@ export default function ShipmentApp() {
           const content = await page.getTextContent()
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const items = content.items as any[]
+          const tokenTexts = items.map((it)=>String(it.str || ""))
+          const fullTextSpaced = tokenTexts.join(" ")
+          const fullTextNoSpace = tokenTexts.join("").replace(/\s+/g, "")
 
           // 각 라벨의 SKU 추출
-          // 「単一のSKU」 뒤 3토큰 안에서 SKU처럼 보이는 문자열 찾기
+          // 1) 토큰 기반 추출
+          // 2) 실패 시 전체 텍스트 정규식 fallback
           // 라벨 위치: transform[5](Y), transform[4](X)로 정렬
           type LabelInfo = { sku: string; y: number; x: number }
           const labelInfos: LabelInfo[] = []
@@ -295,7 +304,40 @@ export default function ShipmentApp() {
             }
           }
 
+          // fallback: 텍스트 전체에서 「単一のSKU <SKU> 数量」 패턴 추출
           if (labelInfos.length === 0) {
+            const re = /単一のSKU\s*([A-Za-z0-9.\-_/]+?)\s*(?:数量|JAN|FBA|$)/g
+            const fallbackSkus: string[] = []
+            let m: RegExpExecArray | null
+            while ((m = re.exec(fullTextSpaced)) !== null) {
+              const s = (m[1] || "").trim()
+              if (s.length > 4) fallbackSkus.push(s)
+            }
+            injectSyntheticLabels(labelInfos, fallbackSkus)
+          }
+
+          // fallback2: marker가 전혀 없어도 페이지 텍스트에서 마스터 realSku를 직접 탐색
+          if (labelInfos.length === 0) {
+            const matchedMasterSkus: string[] = []
+            for (const m of Object.values(master)) {
+              if (!m.sku) continue
+              const norm = normalizeSku(m.sku)
+              if (norm.length < 6) continue
+              if (fullTextNoSpace.toUpperCase().includes(norm)) matchedMasterSkus.push(m.sku)
+            }
+            injectSyntheticLabels(labelInfos, [...new Set(matchedMasterSkus)])
+          }
+
+          if (labelInfos.length === 0) {
+            debugLog.push({
+              file: f.name,
+              page: i + 1,
+              skusOnPage: [],
+              skusNorm: [],
+              matchedLoc: null,
+              labelCount: 0,
+              note: `SKU marker not found on page (textLen=${fullTextNoSpace.length})`,
+            })
             processed++
             continue
           }
@@ -341,6 +383,7 @@ export default function ShipmentApp() {
             skusNorm: uniqueSkus.map(s => normalizeSku(s)),
             matchedLoc: matchedLocs.join(', ') || null,
             labelCount: totalLabels,
+            note: matchedLocs.length ? undefined : "SKU extracted but no master mapping match",
           })
 
           processed++
