@@ -350,6 +350,25 @@ export default function ShipmentApp() {
     }
   }
 
+  // ── pdfjs CDN 로더 ────────────────────────────────────
+  async function loadPdfjs() {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if ((window as any).pdfjsLib) return (window as any).pdfjsLib as any
+    return new Promise<any>((resolve, reject) => {
+      const s = document.createElement('script')
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'
+      s.onload = () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const lib = (window as any).pdfjsLib as any
+        lib.GlobalWorkerOptions.workerSrc =
+          'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+        resolve(lib)
+      }
+      s.onerror = reject
+      document.head.appendChild(s)
+    })
+  }
+
   // ── 라벨 PDF 분류 ──────────────────────────────────────
   async function processLabels(files: File[]) {
     setLabelLoading(true)
@@ -363,12 +382,8 @@ export default function ShipmentApp() {
         if (m.sku && m.loc) skuToLoc[m.sku] = m.loc
       }
 
-      // pdfjs 동적 로드
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const pdfjsLib: any = await import('pdfjs-dist')
-      pdfjsLib.GlobalWorkerOptions.workerSrc =
-        'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
-
+      // pdfjs CDN에서 로드 (빌드 타임 번들링 없음)
+      const pdfjsLib = await loadPdfjs()
       const { PDFDocument } = await import('pdf-lib')
 
       type PageRef = { srcBytes: ArrayBuffer; pageIdx: number }
