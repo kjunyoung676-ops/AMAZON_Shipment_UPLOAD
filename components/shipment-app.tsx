@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useRef } from "react"
+import { useState, useRef, useEffect } from "react"
 import * as XLSX from "xlsx"
 
 // ── SKU 정렬 순서 ─────────────────────────────────────────
@@ -63,6 +63,21 @@ const INP: React.CSSProperties = {border:"none",background:"transparent",fontSiz
 const IBLU: React.CSSProperties = {background:"rgba(219,234,254,0.35)"}
 const EMPTY_SKU = {sku:"",realSku:"",asin:"",to:"",loc:"",cpp:16,fba:0,price:0,kg:0,bx:0,by:0,bz:0}
 
+// ── localStorage 헬퍼 ─────────────────────────────────────
+const LS_KEY = "shipment_app_v1"
+function lsLoad<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(LS_KEY + "_" + key)
+    if (raw) return JSON.parse(raw) as T
+  } catch { /* ignore */ }
+  return fallback
+}
+function lsSave(key: string, value: unknown) {
+  try {
+    localStorage.setItem(LS_KEY + "_" + key, JSON.stringify(value))
+  } catch { /* ignore */ }
+}
+
 // ── 타입 ─────────────────────────────────────────────────
 interface MasterItem {
   sku: string; asin: string; to: string; loc: string; cpp: number;
@@ -73,6 +88,14 @@ interface RowData {
   __groupStart?: boolean;
   quantity: number;
   container_no?: number;
+}
+interface LabelDebugEntry {
+  file: string; page: number;
+  rawSkuText: string;       // PDF에서 読み取ったSKU行テキスト
+  fbaIdInPdf: string;       // PDF 내 FBA 납품 ID
+  matchMethod: string;      // 매칭 방법
+  matched: string | null;
+  loc: string | null;
 }
 
 // ── 계산 ─────────────────────────────────────────────────
@@ -154,6 +177,19 @@ function xlsDl(data: unknown[], sn: string, fn: string) {
   XLSX.writeFile(wb, fn)
 }
 
+// ── FBA ID에서 shipment ID 추출 ───────────────────────────
+// FBA ID 예: FBA15G97HNPC12345678  →  앞 12자 "FBA15G97HNPC"
+// 파일명 예: FBA15G97HNPC-1777530666990.pdf  →  앞 12자 "FBA15G97HNPC"
+function extractFbaPrefix(fbaId: string): string {
+  // FBA + 숫자/문자 구성에서 앞부분 추출 (숫자 연속 전까지, 또는 첫 번째 큰 숫자 블록 전)
+  // "FBA15G97HNPCU002001" → "FBA15G97HNPC" (끝의 연속숫자 제거)
+  // "FBA15G97NRNS00001" → "FBA15G97NRNS"
+  const m = fbaId.match(/^(FBA[A-Z0-9]+?[A-Z])(\d{6,})/)
+  if (m) return m[1]
+  // 대체: U + 연속숫자 제거
+  return fbaId.replace(/U?\d{6,}$/, '')
+}
+
 // ══════════════════════════════════════════════════════════
 export default function ShipmentApp() {
   const [sheets, setSh]      = useState<Record<string, RowData[]>>({})
@@ -161,26 +197,32 @@ export default function ShipmentApp() {
   const [activeSheet, setAs] = useState<string|null>(null)
   const [file, setFile]      = useState<File|null>(null)
   const [mode, setMode]      = useState('1')
-  const [master, setMaster]  = useState<Record<string, MasterItem>>(() =>
-    Object.fromEntries(Object.entries(MASTER_INIT).map(([k,v]) => [k,{...v}]))
+
+  // ── localStorage persist 대상 ──
+  const [master, setMaster] = useState<Record<string, MasterItem>>(() =>
+    lsLoad("master", Object.fromEntries(Object.entries(MASTER_INIT).map(([k,v]) => [k,{...v}])))
   )
-  const [s2meta, setS2meta]    = useState<Record<string, Record<string,string>>>({})
-  const [ctnMeta, setCtnMeta]  = useState<Record<number, Record<string,string>>>({})
-  const [coll, setColl]        = useState<Record<string, boolean>>({})
-  const [newSku, setNewSku]    = useState({...EMPTY_SKU})
+  const [s2meta, setS2meta]   = useState<Record<string, Record<string,string>>>(() => lsLoad("s2meta", {}))
+  const [ctnMeta, setCtnMeta] = useState<Record<number, Record<string,string>>>(() => lsLoad("ctnMeta", {}))
+
+  // master/s2meta/ctnMeta 변경 시 자동 저장
+  useEffect(() => { lsSave("master", master) }, [master])
+  useEffect(() => { lsSave("s2meta", s2meta) }, [s2meta])
+  useEffect(() => { lsSave("ctnMeta", ctnMeta) }, [ctnMeta])
+
+  const [coll, setColl]    = useState<Record<string, boolean>>({})
+  const [newSku, setNewSku] = useState({...EMPTY_SKU})
   const [fbaLoading, setFbaLoading] = useState(false)
+
   // ── 라벨 분류 state ──
   const [labelFiles, setLabelFiles]     = useState<File[]>([])
   const [labelGroups, setLabelGroups]   = useState<Record<string, Uint8Array>>({})
   const [labelCounts, setLabelCounts]   = useState<Record<string, number>>({})
   const [labelLoading, setLabelLoading] = useState(false)
   const [labelStatus, setLabelStatus]   = useState("")
-  interface LabelDebugEntry {
-  file: string; page: number; snippet: string;
-  matched: string | null; loc: string | null;
-}
-const [labelDebug, setLabelDebug] = useState<LabelDebugEntry[]>([])
-const [showDebug, setShowDebug]   = useState(false)
+  const [labelDebug, setLabelDebug]     = useState<LabelDebugEntry[]>([])
+  const [showDebug, setShowDebug]       = useState(false)
+
   const fileRef  = useRef<HTMLInputElement>(null)
   const labelRef = useRef<HTMLInputElement>(null)
 
@@ -199,7 +241,7 @@ const [showDebug, setShowDebug]   = useState(false)
       const ns: Record<string, RowData[]> = {}
       for (const sn of wb.SheetNames) ns[sn] = parseSheet(wb.Sheets[sn])
       setSh(ns); setSn(wb.SheetNames); setAs(wb.SheetNames[0])
-      setMode('1'); setS2meta({}); setCtnMeta({})
+      setMode('1')
     }
     rd.readAsArrayBuffer(f)
   }
@@ -336,7 +378,7 @@ const [showDebug, setShowDebug]   = useState(false)
         set("A", "s", realSku)
         set("B", "n", r.total)
         set("F", "n", 1)
-        set("G", "n", r.total)  // Number of boxes = Quantity
+        set("G", "n", r.total)
         set("H", "n", m.bx || 0)
         set("I", "n", m.by || 0)
         set("J", "n", m.bz || 0)
@@ -357,9 +399,11 @@ const [showDebug, setShowDebug]   = useState(false)
   }
 
   // ── pdfjs CDN 로더 ────────────────────────────────────
-  async function loadPdfjs() {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async function loadPdfjs(): Promise<any> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    if ((window as any).pdfjsLib) return (window as any).pdfjsLib as any
+    if ((window as any).pdfjsLib) return (window as any).pdfjsLib
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return new Promise<any>((resolve, reject) => {
       const s = document.createElement('script')
       s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'
@@ -375,135 +419,235 @@ const [showDebug, setShowDebug]   = useState(false)
     })
   }
 
- // ── 라벨 PDF 분류 ──────────────────────────────────────────
-async function processLabels(files: File[]) {
-  setLabelLoading(true)
-  setLabelGroups({})
-  setLabelCounts({})
-  setLabelDebug([])
-  setLabelStatus("라이브러리 로딩 중...")
-  try {
-    // realSku → loc 역매핑 구성
-    const skuToLoc: Record<string, string> = {}
-    for (const m of Object.values(master)) {
-      if (m.sku && m.loc) skuToLoc[m.sku] = m.loc
-    }
+  // ── 라벨 PDF 분류 ─────────────────────────────────────
+  // 매칭 우선순위:
+  // 1순위: PDF 파일명의 FBA prefix ↔ s2meta에 입력된 FBA ID prefix 비교
+  // 2순위: PDF 내부 텍스트의 FBA ID ↔ s2meta에 입력된 FBA ID 비교
+  // 3순위: PDF 내부 텍스트의 Merchant SKU ↔ master의 realSku 비교
+  async function processLabels(files: File[]) {
+    setLabelLoading(true)
+    setLabelGroups({})
+    setLabelCounts({})
+    setLabelDebug([])
+    setLabelStatus("라이브러리 로딩 중...")
 
-    const pdfjsLib = await loadPdfjs()
-    const { PDFDocument } = await import('pdf-lib')
+    try {
+      // ── 매핑 테이블 구성 ──────────────────────────────
+      // A) FBA ID prefix → loc  (s2meta에서 fbaId 입력된 항목)
+      const fbaIdPrefixToLoc: Record<string, string> = {}
+      const fbaIdFullToLoc: Record<string, string> = {}
+      for (const [abbr, meta] of Object.entries(s2meta)) {
+        const fbaId = (meta.fbaId || "").trim()
+        if (fbaId && master[abbr]?.loc) {
+          fbaIdFullToLoc[fbaId] = master[abbr].loc
+          const prefix = extractFbaPrefix(fbaId)
+          if (prefix) fbaIdPrefixToLoc[prefix] = master[abbr].loc
+        }
+      }
 
-    type PageRef = { srcBytes: ArrayBuffer; pageIdx: number }
-    const locMap: Record<string, PageRef[]> = {}
-    const debugLog: LabelDebugEntry[] = []
+      // B) realSku → loc  (master에서)
+      const realSkuToLoc: Record<string, string> = {}
+      for (const m of Object.values(master)) {
+        if (m.sku && m.loc) realSkuToLoc[m.sku] = m.loc
+      }
 
-    let totalPages = 0
-    let processed = 0
+      const pdfjsLib = await loadPdfjs()
+      const { PDFDocument } = await import('pdf-lib')
 
-    for (const f of files) {
-      const bytes = await f.arrayBuffer()
-      const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(bytes) }).promise
-      totalPages += pdf.numPages
-      pdf.destroy()
-    }
+      type PageRef = { srcBytes: ArrayBuffer; pageIdx: number }
+      const locMap: Record<string, PageRef[]> = {}
+      const debugLog: LabelDebugEntry[] = []
 
-    for (const f of files) {
-      const bytes = await f.arrayBuffer()
-      const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(bytes) }).promise
-      for (let i = 0; i < pdf.numPages; i++) {
-        const page = await pdf.getPage(i + 1)
-        const content = await page.getTextContent()
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const tokens = (content.items as any[]).map((it: any) => it.str as string)
-        const textRaw = tokens.join(' ')
-        // 공백 제거 버전 (토큰 쪼개짐 대응)
-        const textNoSp = tokens.join('').replace(/\s/g, '')
+      let totalPages = 0
+      let processed = 0
 
-        let loc: string | null = null
-        let matchedSku: string | null = null
+      // 전체 페이지 수 파악
+      for (const f of files) {
+        const bytes = await f.arrayBuffer()
+        const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(bytes) }).promise
+        totalPages += pdf.numPages
+        pdf.destroy()
+      }
 
-        for (const [sku, l] of Object.entries(skuToLoc)) {
-          if (!sku) continue
-          const skuNoSp = sku.replace(/\s/g, '')
-          // 원문 매칭 or 공백 제거 매칭
-          if (textRaw.includes(sku) || textNoSp.includes(skuNoSp)) {
-            loc = l
-            matchedSku = sku
-            break
+      // 파일명 → prefix 매핑 미리 구성
+      // "FBA15G97HNPC-1777530666990.pdf" → "FBA15G97HNPC"
+      const fileNamePrefixToLoc: Record<string, string> = {}
+      for (const f of files) {
+        const namePrefix = f.name.replace(/\.pdf$/i, '').split('-')[0].trim()
+        // prefix를 fbaIdPrefixToLoc에서 찾기
+        if (fbaIdPrefixToLoc[namePrefix]) {
+          fileNamePrefixToLoc[f.name] = fbaIdPrefixToLoc[namePrefix]
+        } else {
+          // full FBA ID에서 prefix 추출해서 비교
+          for (const [fbaId, loc] of Object.entries(fbaIdFullToLoc)) {
+            const p = extractFbaPrefix(fbaId)
+            if (p && namePrefix === p) {
+              fileNamePrefixToLoc[f.name] = loc
+              break
+            }
           }
-          // -1Pack suffix 변형 대응: "SKU1Pack" / "SKU 1Pack" 등
-          const skuBase = sku.replace(/-?1Pack$/i, '')
-          const skuBaseNoSp = skuBase.replace(/\s/g, '')
-          if (skuBaseNoSp && textNoSp.includes(skuBaseNoSp)) {
-            loc = l
-            matchedSku = sku + " (base match)"
-            break
+        }
+      }
+
+      for (const f of files) {
+        const bytes = await f.arrayBuffer()
+        const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(bytes) }).promise
+        const fileNamePrefix = f.name.replace(/\.pdf$/i, '').split('-')[0].trim()
+
+        for (let i = 0; i < pdf.numPages; i++) {
+          const page = await pdf.getPage(i + 1)
+          const content = await page.getTextContent()
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const tokens = (content.items as any[]).map((it: any) => it.str as string)
+          const textRaw = tokens.join(' ')
+          const textNoSp = tokens.join('').replace(/\s+/g, '')
+
+          let loc: string | null = null
+          let matchedKey: string | null = null
+          let matchMethod = ""
+          let fbaIdInPdf = ""
+          let rawSkuText = ""
+
+          // ── 방법 1: 파일명 prefix → fbaId prefix 매칭 ──
+          if (fileNamePrefixToLoc[f.name]) {
+            loc = fileNamePrefixToLoc[f.name]
+            matchedKey = fileNamePrefix
+            matchMethod = "파일명 FBA prefix 매칭"
+          }
+
+          // ── 방법 2: PDF 내부 FBA 납품 ID 텍스트 매칭 ──
+          if (!loc) {
+            // FBA ID 패턴 추출: FBA + 대문자+숫자 조합
+            const fbaMatches = textNoSp.match(/FBA[A-Z0-9]{8,20}/g) || []
+            for (const candidate of fbaMatches) {
+              fbaIdInPdf = candidate
+              // full match
+              if (fbaIdFullToLoc[candidate]) {
+                loc = fbaIdFullToLoc[candidate]
+                matchedKey = candidate
+                matchMethod = "PDF 내 FBA ID 전체 매칭"
+                break
+              }
+              // prefix match
+              const prefix = extractFbaPrefix(candidate)
+              if (prefix && fbaIdPrefixToLoc[prefix]) {
+                loc = fbaIdPrefixToLoc[prefix]
+                matchedKey = candidate + " (prefix: " + prefix + ")"
+                matchMethod = "PDF 내 FBA ID prefix 매칭"
+                break
+              }
+            }
+          }
+
+          // ── 방법 3: PDF 내부 Merchant SKU 텍스트 매칭 ──
+          if (!loc) {
+            // "単一のSKU" 다음 줄 텍스트 추출
+            const skuIdx = textRaw.indexOf('単一のSKU')
+            rawSkuText = skuIdx >= 0
+              ? textRaw.slice(skuIdx + 7, skuIdx + 80).trim()
+              : ""
+
+            for (const [realSku, l] of Object.entries(realSkuToLoc)) {
+              if (!realSku) continue
+              const skuNoSp = realSku.replace(/\s+/g, '')
+              if (textRaw.includes(realSku) || textNoSp.includes(skuNoSp)) {
+                loc = l
+                matchedKey = realSku
+                matchMethod = "PDF 내 Merchant SKU 직접 매칭"
+                break
+              }
+              // suffix 변형 대응 (-1Pack, 1Pack 등)
+              const skuBase = realSku.replace(/-?1Pack(-JP)?$/i, '').replace(/\s+/g, '')
+              if (skuBase.length > 6 && textNoSp.includes(skuBase)) {
+                loc = l
+                matchedKey = realSku + " (base)"
+                matchMethod = "PDF 내 SKU base 매칭"
+                break
+              }
+            }
+          }
+
+          debugLog.push({
+            file: f.name,
+            page: i + 1,
+            rawSkuText: rawSkuText || fbaIdInPdf || textRaw.slice(0, 60),
+            fbaIdInPdf,
+            matchMethod,
+            matched: matchedKey,
+            loc,
+          })
+
+          if (loc) {
+            if (!locMap[loc]) locMap[loc] = []
+            locMap[loc].push({ srcBytes: bytes, pageIdx: i })
+          }
+
+          processed++
+          if (processed % 30 === 0 || processed === totalPages) {
+            setLabelStatus(`페이지 분석 중... ${processed}/${totalPages}`)
           }
         }
+        pdf.destroy()
+      }
 
-        // 디버그용: SKU 후보 텍스트 추출 (単一のSKU 다음 텍스트)
-        const skuIdx = textRaw.indexOf('単一のSKU')
-        const skuSnippet = skuIdx >= 0
-          ? textRaw.slice(skuIdx, skuIdx + 60).replace(/\n/g, ' ')
-          : textRaw.slice(0, 80).replace(/\n/g, ' ')
+      setLabelDebug(debugLog)
 
-        debugLog.push({
-          file: f.name,
-          page: i + 1,
-          snippet: skuSnippet,
-          matched: matchedSku,
-          loc: loc,
-        })
+      const matchedCount = debugLog.filter(d => d.matched).length
+      const unmatchedCount = debugLog.filter(d => !d.matched).length
 
-        if (loc) {
-          if (!locMap[loc]) locMap[loc] = []
-          locMap[loc].push({ srcBytes: bytes, pageIdx: i })
+      if (!Object.keys(locMap).length) {
+        setLabelStatus(`매칭 실패 (${unmatchedCount}페이지 미매칭) — 아래 디버그 패널 확인`)
+        setShowDebug(true)
+        return
+      }
+
+      setLabelStatus("PDF 생성 중...")
+      const result: Record<string, Uint8Array> = {}
+      const counts: Record<string, number> = {}
+
+      for (const [loc, refs] of Object.entries(locMap)) {
+        counts[loc] = refs.length
+        const outDoc = await PDFDocument.create()
+        const fileMap = new Map<ArrayBuffer, number[]>()
+        for (const { srcBytes, pageIdx } of refs) {
+          if (!fileMap.has(srcBytes)) fileMap.set(srcBytes, [])
+          fileMap.get(srcBytes)!.push(pageIdx)
         }
-        processed++
-        if (processed % 50 === 0 || processed === totalPages) {
-          setLabelStatus(`페이지 분석 중... ${processed}/${totalPages}`)
+        for (const [srcBytes, indices] of fileMap) {
+          const srcDoc = await PDFDocument.load(srcBytes)
+          const pages = await outDoc.copyPages(srcDoc, indices)
+          pages.forEach(p => outDoc.addPage(p))
         }
+        result[loc] = await outDoc.save()
       }
-      pdf.destroy()
+
+      setLabelGroups(result)
+      setLabelCounts(counts)
+      setLabelStatus(
+        `완료 — ${Object.keys(result).length}개 BOX CODE로 분류됨` +
+        (unmatchedCount > 0 ? ` (미매칭 ${unmatchedCount}페이지)` : "")
+      )
+      if (unmatchedCount > 0) setShowDebug(true)
+
+    } catch (e) {
+      alert('처리 오류: ' + (e as Error).message)
+      setLabelStatus("")
+    } finally {
+      setLabelLoading(false)
     }
-
-    setLabelDebug(debugLog)
-
-    if (!Object.keys(locMap).length) {
-      setLabelStatus("매칭 실패 — 아래 디버그 패널을 확인하세요")
-      return
-    }
-
-    setLabelStatus("PDF 생성 중...")
-    const result: Record<string, Uint8Array> = {}
-    const counts: Record<string, number> = {}
-
-    for (const [loc, refs] of Object.entries(locMap)) {
-      counts[loc] = refs.length
-      const outDoc = await PDFDocument.create()
-      const fileMap = new Map<ArrayBuffer, number[]>()
-      for (const { srcBytes, pageIdx } of refs) {
-        if (!fileMap.has(srcBytes)) fileMap.set(srcBytes, [])
-        fileMap.get(srcBytes)!.push(pageIdx)
-      }
-      for (const [srcBytes, indices] of fileMap) {
-        const srcDoc = await PDFDocument.load(srcBytes)
-        const pages = await outDoc.copyPages(srcDoc, indices)
-        pages.forEach(p => outDoc.addPage(p))
-      }
-      result[loc] = await outDoc.save()
-    }
-
-    setLabelGroups(result)
-    setLabelCounts(counts)
-    setLabelStatus(`완료 — ${Object.keys(result).length}개 BOX CODE로 분류됨`)
-  } catch (e) {
-    alert('처리 오류: ' + (e as Error).message)
-    setLabelStatus("")
-  } finally {
-    setLabelLoading(false)
   }
-}
-  
+
+  function dlLabel(loc: string, bytes: Uint8Array) {
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }))
+    a.download = `${loc}.pdf`
+    a.click()
+  }
+
+  function dlAllLabels() {
+    Object.entries(labelGroups).forEach(([l, b]) => dlLabel(l, b))
+  }
+
   // ── 시트 탭 ────────────────────────────────────────────
   function SheetTabs() {
     if (!sheetNames.length) return null
@@ -702,7 +846,7 @@ async function processLabels(files: File[]) {
                     <td style={{...TD,textAlign:"right",minWidth:70,borderRight:"1px solid var(--color-border-tertiary)"}}>{r.gw.toFixed(1)}</td>
                     <td style={{...TD,textAlign:"right",minWidth:60,borderRight:"2px solid var(--color-border-secondary)"}}>{r.cbm}</td>
                     {(["fc","address","fbaId","amazonId"] as const).map((f, idx) => {
-                      const placeholders = ["FC CENTER","주소","FBA ID","아마존 ID"]
+                      const placeholders = ["FC CENTER","주소","FBA ID (라벨분류 기준)","아마존 ID"]
                       return (
                         <td key={f} style={{...TD,minWidth:[80,150,110,90][idx],...IBLU}}>
                           <input value={r[f]} onChange={e => updMeta(r.sku,f,e.target.value)} style={INP} placeholder={placeholders[idx]} />
@@ -725,6 +869,10 @@ async function processLabels(files: File[]) {
               </tfoot>
             </table>
           </div>
+          {/* FBA ID 입력 안내 */}
+          <div style={{marginTop:8,padding:"6px 10px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",fontSize:11,color:"var(--color-text-secondary)",border:"0.5px solid var(--color-border-tertiary)"}}>
+            💡 <strong>라벨 분류 사용법:</strong> FBA ID 열에 Amazon에서 발급된 납품 ID(예: <code>FBA15G97HNPC...</code>)를 입력 후 → 라벨 분류 탭에서 PDF 업로드. PDF 파일명의 FBA 코드와 자동 매칭됩니다.
+          </div>
         </div>
       )}
 
@@ -744,6 +892,32 @@ async function processLabels(files: File[]) {
               </button>
             )}
           </div>
+
+          {/* FBA ID 현황 */}
+          {(() => {
+            const mapped = s2rows.filter(r => r.fbaId)
+            const unmapped = s2rows.filter(r => !r.fbaId)
+            return (
+              <div style={{marginBottom:12,padding:"8px 12px",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",fontSize:11,background:"var(--color-background-secondary)"}}>
+                <div style={{fontWeight:500,marginBottom:4,fontSize:12}}>1차 가공에서 입력된 FBA ID 현황</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                  {mapped.map(r => (
+                    <span key={r.sku} style={{padding:"2px 8px",borderRadius:12,background:"rgba(16,185,129,0.12)",border:"0.5px solid rgba(16,185,129,0.3)",color:"var(--color-text-success)"}}>
+                      {r.sku} → <code style={{fontSize:10}}>{r.fbaId}</code>
+                    </span>
+                  ))}
+                  {unmapped.map(r => (
+                    <span key={r.sku} style={{padding:"2px 8px",borderRadius:12,background:"rgba(239,68,68,0.08)",border:"0.5px solid rgba(239,68,68,0.2)",color:"var(--color-text-danger)"}}>
+                      {r.sku} — FBA ID 없음
+                    </span>
+                  ))}
+                  {s2rows.length === 0 && (
+                    <span style={{color:"var(--color-text-tertiary)"}}>1차 가공에서 FBA ID를 먼저 입력해주세요</span>
+                  )}
+                </div>
+              </div>
+            )
+          })()}
 
           {/* 업로드 드롭존 */}
           <div
@@ -768,12 +942,12 @@ async function processLabels(files: File[]) {
               {labelLoading
                 ? labelStatus
                 : labelFiles.length
-                  ? `${labelFiles.length}개 파일 처리 완료 — 다시 업로드하려면 클릭`
+                  ? `${labelFiles.length}개 파일 처리 완료 (${labelStatus}) — 다시 업로드하려면 클릭`
                   : "FBA 카톤 라벨 PDF 업로드 (여러 파일 동시 가능)"}
             </span>
             {!labelLoading && (
               <span style={{fontSize:11,color:"var(--color-text-tertiary)"}}>
-                라벨 내 SKU를 자동으로 인식해 BOX CODE별로 분리합니다
+                PDF 파일명의 FBA ID → 1차 가공 FBA ID → BOX CODE 순으로 매칭합니다
               </span>
             )}
           </div>
@@ -787,7 +961,7 @@ async function processLabels(files: File[]) {
 
           {/* 결과 테이블 */}
           {Object.keys(labelGroups).length > 0 && !labelLoading && (
-            <div style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",overflow:"hidden"}}>
+            <div style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",overflow:"hidden",marginBottom:12}}>
               <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                 <thead>
                   <tr>
@@ -834,67 +1008,70 @@ async function processLabels(files: File[]) {
               </table>
             </div>
           )}
+
+          {/* 디버그 패널 */}
+          {labelDebug.length > 0 && (
+            <div>
+              <button
+                onClick={() => setShowDebug(v => !v)}
+                style={{fontSize:11, padding:"4px 12px", cursor:"pointer",
+                  border:"0.5px solid var(--color-border-tertiary)",
+                  borderRadius:"var(--border-radius-md)", background:"transparent",
+                  color:"var(--color-text-secondary)", marginBottom: 8,
+                  display:"flex", alignItems:"center", gap:6}}
+              >
+                <span>{showDebug ? "▲" : "▼"}</span>
+                <span>디버그 패널</span>
+                <span style={{padding:"1px 6px",borderRadius:10,background:"rgba(16,185,129,0.15)",color:"var(--color-text-success)",fontSize:10}}>
+                  ✅ {labelDebug.filter(d=>d.matched).length}
+                </span>
+                <span style={{padding:"1px 6px",borderRadius:10,background:"rgba(239,68,68,0.1)",color:"var(--color-text-danger)",fontSize:10}}>
+                  ❌ {labelDebug.filter(d=>!d.matched).length}
+                </span>
+              </button>
+              {showDebug && (
+                <div style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",overflow:"hidden",fontSize:11}}>
+                  <div style={{maxHeight:360, overflowY:"auto"}}>
+                    <table style={{width:"100%", borderCollapse:"collapse"}}>
+                      <thead>
+                        <tr style={{position:"sticky",top:0}}>
+                          {["파일명","P","매칭방법","PDF 내 텍스트 (SKU/FBA)","매칭 결과","BOX CODE"].map(h => (
+                            <th key={h} style={{...TH, fontSize:10, padding:"5px 8px"}}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {labelDebug.map((d, i) => (
+                          <tr key={i} style={{
+                            background: d.matched
+                              ? (i%2===0?"transparent":"var(--color-background-secondary)")
+                              : "rgba(254,202,202,0.25)"
+                          }}>
+                            <td style={{...TD, fontSize:10, color:"var(--color-text-tertiary)", maxWidth:130, padding:"3px 8px"}}>{d.file}</td>
+                            <td style={{...TD, fontSize:10, textAlign:"right", padding:"3px 8px"}}>{d.page}</td>
+                            <td style={{...TD, fontSize:10, color:"var(--color-text-secondary)", padding:"3px 8px", maxWidth:120}}>
+                              {d.matchMethod || (d.matched ? "—" : "미매칭")}
+                            </td>
+                            <td style={{...TD, fontSize:10, fontFamily:"var(--font-mono)", maxWidth:220, padding:"3px 8px",
+                              color: d.matched ? "var(--color-text-primary)" : "var(--color-text-danger)"}}>
+                              {d.rawSkuText || d.fbaIdInPdf || "—"}
+                            </td>
+                            <td style={{...TD, fontSize:10, fontWeight: d.matched?500:400, padding:"3px 8px",
+                              color: d.matched ? "var(--color-text-success)" : "var(--color-text-danger)"}}>
+                              {d.matched || "❌ 없음"}
+                            </td>
+                            <td style={{...TD, fontSize:10, color:"var(--color-text-info)", padding:"3px 8px"}}>{d.loc || "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
-      
-      {/* 디버그 패널 */}
-{labelDebug.length > 0 && (
-  <div style={{marginTop: 12}}>
-    <button
-      onClick={() => setShowDebug(v => !v)}
-      style={{fontSize:11, padding:"3px 10px", cursor:"pointer",
-        border:"0.5px solid var(--color-border-tertiary)",
-        borderRadius:"var(--border-radius-md)", background:"transparent",
-        color:"var(--color-text-secondary)", marginBottom: 8}}
-    >
-      {showDebug ? "▲ 디버그 숨기기" : `▼ 디버그 보기 (${labelDebug.length}페이지)`}
-    </button>
-    {showDebug && (
-      <div style={{border:"0.5px solid var(--color-border-tertiary)",
-        borderRadius:"var(--border-radius-md)", overflow:"hidden", fontSize:11}}>
-        <div style={{padding:"6px 10px", background:"var(--color-background-secondary)",
-          borderBottom:"1px solid var(--color-border-tertiary)",
-          display:"flex", gap:16, color:"var(--color-text-secondary)"}}>
-          <span>✅ 매칭: {labelDebug.filter(d=>d.matched).length}페이지</span>
-          <span style={{color:"var(--color-text-danger)"}}>
-            ❌ 미매칭: {labelDebug.filter(d=>!d.matched).length}페이지
-          </span>
-        </div>
-        <div style={{maxHeight:300, overflowY:"auto"}}>
-          <table style={{width:"100%", borderCollapse:"collapse"}}>
-            <thead>
-              <tr>
-                {["파일","페이지","PDF 내 SKU 텍스트","매칭 SKU","BOX CODE"].map(h => (
-                  <th key={h} style={{...TH, fontSize:10}}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {labelDebug.map((d, i) => (
-                <tr key={i} style={{
-                  background: d.matched
-                    ? (i%2===0?"transparent":"var(--color-background-secondary)")
-                    : "rgba(254,202,202,0.3)"
-                }}>
-                  <td style={{...TD, fontSize:10, color:"var(--color-text-tertiary)", maxWidth:120}}>{d.file}</td>
-                  <td style={{...TD, fontSize:10, textAlign:"right"}}>{d.page}</td>
-                  <td style={{...TD, fontSize:10, fontFamily:"var(--font-mono)", maxWidth:260,
-                    color: d.matched ? "var(--color-text-primary)" : "var(--color-text-danger)"}}>
-                    {d.snippet}
-                  </td>
-                  <td style={{...TD, fontSize:10, color:"var(--color-text-success)", fontWeight: d.matched?500:400}}>
-                    {d.matched || "—"}
-                  </td>
-                  <td style={{...TD, fontSize:10, color:"var(--color-text-info)"}}>{d.loc || "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    )}
-  </div>
-)}
 
       {/* ══ STEP 3 ══ */}
       {mode==='3' && (
@@ -1014,10 +1191,18 @@ async function processLabels(files: File[]) {
               setMaster(p => ({...p, [newSku.sku]:{sku:newSku.realSku||newSku.sku,asin:newSku.asin,to:newSku.to,loc:newSku.loc,cpp:+newSku.cpp,fba:+newSku.fba,price:+newSku.price,kg:+newSku.kg,bx:+newSku.bx,by:+newSku.by,bz:+newSku.bz}}))
               setNewSku({...EMPTY_SKU})
             }} style={{marginLeft:"auto",fontSize:11,padding:"3px 10px"}}>+ 추가</button>
+            <button onClick={() => {
+              if (confirm("마스터 데이터를 초기값으로 리셋하시겠습니까?")) {
+                setMaster(Object.fromEntries(Object.entries(MASTER_INIT).map(([k,v]) => [k,{...v}])))
+              }
+            }} style={{fontSize:11,padding:"3px 10px",color:"var(--color-text-danger)",border:"0.5px solid var(--color-border-danger)",borderRadius:"var(--border-radius-md)",background:"transparent",cursor:"pointer"}}>초기화</button>
             <button onClick={() => xlsDl(
               Object.entries(master).map(([sku,m]) => ({약호:sku,SKU:m.sku,ASIN:m.asin,구박스:m.to,신박스:m.loc,PLT당카톤:m.cpp,FBA비용:m.fba,판매가:m.price,무게kg:m.kg,박스가로:m.bx,박스세로:m.by,박스높이:m.bz})),
               "마스터","SKU마스터.xlsx"
             )} style={{fontSize:11,padding:"3px 10px"}}>xlsx 저장</button>
+          </div>
+          <div style={{marginBottom:8,padding:"5px 10px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",fontSize:11,color:"var(--color-text-secondary)"}}>
+            💾 마스터 데이터는 브라우저에 자동 저장됩니다 (재배포 후에도 유지)
           </div>
           <div style={{overflowX:"auto",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)"}}>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
