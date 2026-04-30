@@ -330,7 +330,7 @@ export default function ShipmentApp() {
         set("A", "s", realSku)
         set("B", "n", r.total)
         set("F", "n", 1)
-        set("G", "n", r.total)
+        set("G", "n", r.total)  // Number of boxes = Quantity
         set("H", "n", m.bx || 0)
         set("I", "n", m.by || 0)
         set("J", "n", m.bz || 0)
