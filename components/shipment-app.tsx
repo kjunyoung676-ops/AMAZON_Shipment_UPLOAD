@@ -251,6 +251,10 @@ export default function ShipmentApp() {
       let processed = 0
 
       // 전체 페이지 수
+      const injectSyntheticLabels = (target: { sku: string; y: number; x: number }[], skus: string[]) => {
+        skus.forEach((sku, idx) => target.push({ sku, y: 10000 - idx * 40, x: idx % 2 === 0 ? 0 : 1000 }))
+      }
+
       for (const f of files) {
         const bytes = new Uint8Array(await f.arrayBuffer())
         const pdf = await pdfjsLib.getDocument({ data: bytes.slice() }).promise
@@ -267,6 +271,9 @@ export default function ShipmentApp() {
           const content = await page.getTextContent()
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const items = content.items as any[]
+          const tokenTexts = items.map((it)=>String(it.str || ""))
+          const fullTextSpaced = tokenTexts.join(" ")
+          const fullTextNoSpace = tokenTexts.join("").replace(/\s+/g, "")
 
           // 각 라벨의 SKU 추출
           // 1) 토큰 기반 추출
