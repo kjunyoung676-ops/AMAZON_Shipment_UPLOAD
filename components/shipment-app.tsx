@@ -318,41 +318,30 @@ async function expFbaUpload() {
     if (!templateSheetName) throw new Error("template 시트를 찾을 수 없습니다. 시트 목록: " + wb.SheetNames.join(", "))
     const ws = wb.Sheets[templateSheetName]
     const rows = buildS2rows()
-
     rows.forEach((r, i) => {
       const row = 9 + i
       const m = master[r.sku] || ({} as MasterItem)
       const realSku = m.sku || r.sku
-
       const set = (col: string, t: "s"|"n", v: string|number) => {
         ws[col + row] = { ...(ws[col + row] || {}), t, v, w: String(v) }
       }
-
-      set("A", "s", realSku)           // Merchant SKU
-      set("B", "n", r.total)           // Quantity
-      // C: Prep owner       → 빈칸
-      // D: Labeling owner   → 빈칸
-      // E: Expiration date  → 빈칸
-      set("F", "n", 1)                 // Units per box (고정)
-      set("G", "n", 1)                 // Number of boxes (고정)
-      set("H", "n", m.bx || 0)        // Box length (cm)
-      set("I", "n", m.by || 0)        // Box width (cm)
-      set("J", "n", m.bz || 0)        // Box height (cm)
-      set("K", "n", m.kg || 0)        // Box weight (kg)
+      set("A", "s", realSku)
+      set("B", "n", r.total)
+      set("F", "n", 1)
+      set("G", "n", 1)
+      set("H", "n", m.bx || 0)
+      set("I", "n", m.by || 0)
+      set("J", "n", m.bz || 0)
+      set("K", "n", m.kg || 0)
     })
-
-    // !ref 범위 확장
     if (rows.length > 0) {
       const currentRef = ws["!ref"] || "A1:K8"
       const decoded = XLSX.utils.decode_range(currentRef)
-      decoded.e.r = Math.max(decoded.e.r, 8 + rows.length - 1) // 0-indexed, 행9 = index 8
-      decoded.e.c = Math.max(decoded.e.c, 10) // K열 = index 10
+      decoded.e.r = Math.max(decoded.e.r, 8 + rows.length - 1)
+      decoded.e.c = Math.max(decoded.e.c, 10)
       ws["!ref"] = XLSX.utils.encode_range(decoded)
     }
-
-    XLSX.writeFile(wb, "UPLOAD_FORMAT_filled.xlsx", {
-      cellStyles: true, compression: true,
-    })
+    XLSX.writeFile(wb, "UPLOAD_FORMAT_filled.xlsx", { cellStyles: true, compression: true })
   } catch (e) {
     alert("오류: " + (e as Error).message)
   } finally {
