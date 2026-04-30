@@ -74,6 +74,7 @@ interface LabelDebugEntry {
   skusNorm: string[]         // 정규화된 SKU (매칭 비교용)
   matchedLoc: string | null  // 매칭된 LOC
   labelCount: number
+  note?: string
 }
 
 const calcGW  = (qty:number, nw:number) => Math.trunc(qty*nw*1.01*10)/10
@@ -268,7 +269,8 @@ export default function ShipmentApp() {
           const items = content.items as any[]
 
           // 각 라벨의 SKU 추출
-          // 「単一のSKU」 뒤 3토큰 안에서 SKU처럼 보이는 문자열 찾기
+          // 1) 토큰 기반 추출
+          // 2) 실패 시 전체 텍스트 정규식 fallback
           // 라벨 위치: transform[5](Y), transform[4](X)로 정렬
           type LabelInfo = { sku: string; y: number; x: number }
           const labelInfos: LabelInfo[] = []
@@ -295,7 +297,29 @@ export default function ShipmentApp() {
             }
           }
 
+          // fallback: 텍스트 전체에서 「単一のSKU <SKU> 数量」 패턴 추출
           if (labelInfos.length === 0) {
+            const fullText = items.map((it)=>String(it.str||"")).join(" ")
+            const re = /単一のSKU\s*([A-Za-z0-9.\-_/]+?)\s*(?:数量|JAN|FBA|$)/g
+            const fallbackSkus: string[] = []
+            let m: RegExpExecArray | null
+            while ((m = re.exec(fullText)) !== null) {
+              const s = (m[1] || "").trim()
+              if (s.length > 4) fallbackSkus.push(s)
+            }
+            fallbackSkus.forEach((sku, idx) => labelInfos.push({ sku, y: 10000 - idx * 40, x: idx % 2 === 0 ? 0 : 1000 }))
+          }
+
+          if (labelInfos.length === 0) {
+            debugLog.push({
+              file: f.name,
+              page: i + 1,
+              skusOnPage: [],
+              skusNorm: [],
+              matchedLoc: null,
+              labelCount: 0,
+              note: "SKU marker not found on page",
+            })
             processed++
             continue
           }
@@ -341,6 +365,7 @@ export default function ShipmentApp() {
             skusNorm: uniqueSkus.map(s => normalizeSku(s)),
             matchedLoc: matchedLocs.join(', ') || null,
             labelCount: totalLabels,
+            note: matchedLocs.length ? undefined : "SKU extracted but no master mapping match",
           })
 
           processed++
