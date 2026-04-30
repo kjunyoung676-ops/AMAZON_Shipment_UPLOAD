@@ -175,6 +175,12 @@ export default function ShipmentApp() {
   const [labelCounts, setLabelCounts]   = useState<Record<string, number>>({})
   const [labelLoading, setLabelLoading] = useState(false)
   const [labelStatus, setLabelStatus]   = useState("")
+  interface LabelDebugEntry {
+  file: string; page: number; snippet: string;
+  matched: string | null; loc: string | null;
+}
+const [labelDebug, setLabelDebug] = useState<LabelDebugEntry[]>([])
+const [showDebug, setShowDebug]   = useState(false)
   const fileRef  = useRef<HTMLInputElement>(null)
   const labelRef = useRef<HTMLInputElement>(null)
 
@@ -369,110 +375,135 @@ export default function ShipmentApp() {
     })
   }
 
-  // ── 라벨 PDF 분류 ──────────────────────────────────────
-  async function processLabels(files: File[]) {
-    setLabelLoading(true)
-    setLabelGroups({})
-    setLabelCounts({})
-    setLabelStatus("라이브러리 로딩 중...")
-    try {
-      // realSku → loc 역매핑 구성
-      const skuToLoc: Record<string, string> = {}
-      for (const m of Object.values(master)) {
-        if (m.sku && m.loc) skuToLoc[m.sku] = m.loc
-      }
-
-      // pdfjs CDN에서 로드 (빌드 타임 번들링 없음)
-      const pdfjsLib = await loadPdfjs()
-      const { PDFDocument } = await import('pdf-lib')
-
-      type PageRef = { srcBytes: ArrayBuffer; pageIdx: number }
-      const locMap: Record<string, PageRef[]> = {}
-
-      let totalPages = 0
-      let processed = 0
-
-      // 전체 페이지 수 먼저 파악
-      for (const f of files) {
-        const bytes = await f.arrayBuffer()
-        const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(bytes) }).promise
-        totalPages += pdf.numPages
-        pdf.destroy()
-      }
-
-      // 각 파일 처리
-      for (const f of files) {
-        const bytes = await f.arrayBuffer()
-        const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(bytes) }).promise
-        for (let i = 0; i < pdf.numPages; i++) {
-          const page = await pdf.getPage(i + 1)
-          const content = await page.getTextContent()
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const text = (content.items as any[]).map((it: any) => it.str).join(' ')
-          let loc: string | null = null
-          for (const [sku, l] of Object.entries(skuToLoc)) {
-            if (sku && text.includes(sku)) { loc = l; break }
-          }
-          if (loc) {
-            if (!locMap[loc]) locMap[loc] = []
-            locMap[loc].push({ srcBytes: bytes, pageIdx: i })
-          }
-          processed++
-          if (processed % 50 === 0 || processed === totalPages) {
-            setLabelStatus(`페이지 분석 중... ${processed}/${totalPages}`)
-          }
-        }
-        pdf.destroy()
-      }
-
-      if (!Object.keys(locMap).length) {
-        alert('매칭된 라벨 없음 — SKU 매핑을 확인하세요.')
-        return
-      }
-
-      setLabelStatus("PDF 생성 중...")
-      const result: Record<string, Uint8Array> = {}
-      const counts: Record<string, number> = {}
-
-      for (const [loc, refs] of Object.entries(locMap)) {
-        counts[loc] = refs.length
-        const outDoc = await PDFDocument.create()
-        // 같은 파일끼리 묶어서 한 번에 복사 (성능 최적화)
-        const fileMap = new Map<ArrayBuffer, number[]>()
-        for (const { srcBytes, pageIdx } of refs) {
-          if (!fileMap.has(srcBytes)) fileMap.set(srcBytes, [])
-          fileMap.get(srcBytes)!.push(pageIdx)
-        }
-        for (const [srcBytes, indices] of fileMap) {
-          const srcDoc = await PDFDocument.load(srcBytes)
-          const pages = await outDoc.copyPages(srcDoc, indices)
-          pages.forEach(p => outDoc.addPage(p))
-        }
-        result[loc] = await outDoc.save()
-      }
-
-      setLabelGroups(result)
-      setLabelCounts(counts)
-      setLabelStatus(`완료 — ${Object.keys(result).length}개 BOX CODE로 분류됨`)
-    } catch (e) {
-      alert('처리 오류: ' + (e as Error).message)
-      setLabelStatus("")
-    } finally {
-      setLabelLoading(false)
+ // ── 라벨 PDF 분류 ──────────────────────────────────────────
+async function processLabels(files: File[]) {
+  setLabelLoading(true)
+  setLabelGroups({})
+  setLabelCounts({})
+  setLabelDebug([])
+  setLabelStatus("라이브러리 로딩 중...")
+  try {
+    // realSku → loc 역매핑 구성
+    const skuToLoc: Record<string, string> = {}
+    for (const m of Object.values(master)) {
+      if (m.sku && m.loc) skuToLoc[m.sku] = m.loc
     }
-  }
 
-  function dlLabel(loc: string, bytes: Uint8Array) {
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }))
-    a.download = `${loc}.pdf`
-    a.click()
-  }
+    const pdfjsLib = await loadPdfjs()
+    const { PDFDocument } = await import('pdf-lib')
 
-  function dlAllLabels() {
-    Object.entries(labelGroups).forEach(([l, b]) => dlLabel(l, b))
-  }
+    type PageRef = { srcBytes: ArrayBuffer; pageIdx: number }
+    const locMap: Record<string, PageRef[]> = {}
+    const debugLog: LabelDebugEntry[] = []
 
+    let totalPages = 0
+    let processed = 0
+
+    for (const f of files) {
+      const bytes = await f.arrayBuffer()
+      const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(bytes) }).promise
+      totalPages += pdf.numPages
+      pdf.destroy()
+    }
+
+    for (const f of files) {
+      const bytes = await f.arrayBuffer()
+      const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(bytes) }).promise
+      for (let i = 0; i < pdf.numPages; i++) {
+        const page = await pdf.getPage(i + 1)
+        const content = await page.getTextContent()
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const tokens = (content.items as any[]).map((it: any) => it.str as string)
+        const textRaw = tokens.join(' ')
+        // 공백 제거 버전 (토큰 쪼개짐 대응)
+        const textNoSp = tokens.join('').replace(/\s/g, '')
+
+        let loc: string | null = null
+        let matchedSku: string | null = null
+
+        for (const [sku, l] of Object.entries(skuToLoc)) {
+          if (!sku) continue
+          const skuNoSp = sku.replace(/\s/g, '')
+          // 원문 매칭 or 공백 제거 매칭
+          if (textRaw.includes(sku) || textNoSp.includes(skuNoSp)) {
+            loc = l
+            matchedSku = sku
+            break
+          }
+          // -1Pack suffix 변형 대응: "SKU1Pack" / "SKU 1Pack" 등
+          const skuBase = sku.replace(/-?1Pack$/i, '')
+          const skuBaseNoSp = skuBase.replace(/\s/g, '')
+          if (skuBaseNoSp && textNoSp.includes(skuBaseNoSp)) {
+            loc = l
+            matchedSku = sku + " (base match)"
+            break
+          }
+        }
+
+        // 디버그용: SKU 후보 텍스트 추출 (単一のSKU 다음 텍스트)
+        const skuIdx = textRaw.indexOf('単一のSKU')
+        const skuSnippet = skuIdx >= 0
+          ? textRaw.slice(skuIdx, skuIdx + 60).replace(/\n/g, ' ')
+          : textRaw.slice(0, 80).replace(/\n/g, ' ')
+
+        debugLog.push({
+          file: f.name,
+          page: i + 1,
+          snippet: skuSnippet,
+          matched: matchedSku,
+          loc: loc,
+        })
+
+        if (loc) {
+          if (!locMap[loc]) locMap[loc] = []
+          locMap[loc].push({ srcBytes: bytes, pageIdx: i })
+        }
+        processed++
+        if (processed % 50 === 0 || processed === totalPages) {
+          setLabelStatus(`페이지 분석 중... ${processed}/${totalPages}`)
+        }
+      }
+      pdf.destroy()
+    }
+
+    setLabelDebug(debugLog)
+
+    if (!Object.keys(locMap).length) {
+      setLabelStatus("매칭 실패 — 아래 디버그 패널을 확인하세요")
+      return
+    }
+
+    setLabelStatus("PDF 생성 중...")
+    const result: Record<string, Uint8Array> = {}
+    const counts: Record<string, number> = {}
+
+    for (const [loc, refs] of Object.entries(locMap)) {
+      counts[loc] = refs.length
+      const outDoc = await PDFDocument.create()
+      const fileMap = new Map<ArrayBuffer, number[]>()
+      for (const { srcBytes, pageIdx } of refs) {
+        if (!fileMap.has(srcBytes)) fileMap.set(srcBytes, [])
+        fileMap.get(srcBytes)!.push(pageIdx)
+      }
+      for (const [srcBytes, indices] of fileMap) {
+        const srcDoc = await PDFDocument.load(srcBytes)
+        const pages = await outDoc.copyPages(srcDoc, indices)
+        pages.forEach(p => outDoc.addPage(p))
+      }
+      result[loc] = await outDoc.save()
+    }
+
+    setLabelGroups(result)
+    setLabelCounts(counts)
+    setLabelStatus(`완료 — ${Object.keys(result).length}개 BOX CODE로 분류됨`)
+  } catch (e) {
+    alert('처리 오류: ' + (e as Error).message)
+    setLabelStatus("")
+  } finally {
+    setLabelLoading(false)
+  }
+}
+  
   // ── 시트 탭 ────────────────────────────────────────────
   function SheetTabs() {
     if (!sheetNames.length) return null
@@ -805,6 +836,65 @@ export default function ShipmentApp() {
           )}
         </div>
       )}
+      
+      {/* 디버그 패널 */}
+{labelDebug.length > 0 && (
+  <div style={{marginTop: 12}}>
+    <button
+      onClick={() => setShowDebug(v => !v)}
+      style={{fontSize:11, padding:"3px 10px", cursor:"pointer",
+        border:"0.5px solid var(--color-border-tertiary)",
+        borderRadius:"var(--border-radius-md)", background:"transparent",
+        color:"var(--color-text-secondary)", marginBottom: 8}}
+    >
+      {showDebug ? "▲ 디버그 숨기기" : `▼ 디버그 보기 (${labelDebug.length}페이지)`}
+    </button>
+    {showDebug && (
+      <div style={{border:"0.5px solid var(--color-border-tertiary)",
+        borderRadius:"var(--border-radius-md)", overflow:"hidden", fontSize:11}}>
+        <div style={{padding:"6px 10px", background:"var(--color-background-secondary)",
+          borderBottom:"1px solid var(--color-border-tertiary)",
+          display:"flex", gap:16, color:"var(--color-text-secondary)"}}>
+          <span>✅ 매칭: {labelDebug.filter(d=>d.matched).length}페이지</span>
+          <span style={{color:"var(--color-text-danger)"}}>
+            ❌ 미매칭: {labelDebug.filter(d=>!d.matched).length}페이지
+          </span>
+        </div>
+        <div style={{maxHeight:300, overflowY:"auto"}}>
+          <table style={{width:"100%", borderCollapse:"collapse"}}>
+            <thead>
+              <tr>
+                {["파일","페이지","PDF 내 SKU 텍스트","매칭 SKU","BOX CODE"].map(h => (
+                  <th key={h} style={{...TH, fontSize:10}}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {labelDebug.map((d, i) => (
+                <tr key={i} style={{
+                  background: d.matched
+                    ? (i%2===0?"transparent":"var(--color-background-secondary)")
+                    : "rgba(254,202,202,0.3)"
+                }}>
+                  <td style={{...TD, fontSize:10, color:"var(--color-text-tertiary)", maxWidth:120}}>{d.file}</td>
+                  <td style={{...TD, fontSize:10, textAlign:"right"}}>{d.page}</td>
+                  <td style={{...TD, fontSize:10, fontFamily:"var(--font-mono)", maxWidth:260,
+                    color: d.matched ? "var(--color-text-primary)" : "var(--color-text-danger)"}}>
+                    {d.snippet}
+                  </td>
+                  <td style={{...TD, fontSize:10, color:"var(--color-text-success)", fontWeight: d.matched?500:400}}>
+                    {d.matched || "—"}
+                  </td>
+                  <td style={{...TD, fontSize:10, color:"var(--color-text-info)"}}>{d.loc || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    )}
+  </div>
+)}
 
       {/* ══ STEP 3 ══ */}
       {mode==='3' && (
