@@ -67,7 +67,14 @@ function lsSave(key: string, value: unknown) {
 
 interface MasterItem { sku:string; asin:string; to:string; loc:string; cpp:number; fba:number; price:number; kg:number; bx:number; by:number; bz:number }
 interface RowData { [key:string]:unknown; __groupStart?:boolean; quantity:number; container_no?:number }
-interface LabelDebugEntry { file:string; page:number; skusOnPage:string[]; matchedLoc:string|null; labelCount:number }
+interface LabelDebugEntry {
+  file: string
+  page: number
+  skusOnPage: string[]       // PDF에서 읽힌 원문 SKU 텍스트
+  skusNorm: string[]         // 정규화된 SKU (매칭 비교용)
+  matchedLoc: string | null  // 매칭된 LOC
+  labelCount: number
+}
 
 const calcGW  = (qty:number, nw:number) => Math.trunc(qty*nw*1.01*10)/10
 const calcCBM = (qty:number, bx:number, by:number, bz:number) => Math.round(bx*by*bz/1000000*qty*100)/100
@@ -165,14 +172,43 @@ export default function ShipmentApp() {
     return new Promise<any>((resolve,reject)=>{const s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';s.onload=()=>{const lib=(window as any).pdfjsLib as any;lib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';resolve(lib)};s.onerror=reject;document.head.appendChild(s)})
   }
 
+  // ── SKU 정규화: 하이픈·공백·suffix 제거 후 비교용 문자열 반환 ──
+  function normalizeSku(sku: string): string {
+    return sku
+      .replace(/\s+/g, '')           // 공백 전체 제거
+      .replace(/-/g, '')             // 하이픈 전체 제거
+      .replace(/1Pack(JP)?$/i, '')   // 1Pack / 1PackJP suffix 제거
+      .toUpperCase()
+  }
+
   // ── realSku → loc 매핑 헬퍼 ──────────────────────────────
+  // 매칭 우선순위:
+  // 1. 완전 일치
+  // 2. 공백 제거 후 일치
+  // 3. 하이픈+공백 제거 후 일치
+  // 4. suffix(1Pack, 1Pack-JP 등) + 하이픈 제거 후 일치
   function skuToLoc(sku: string, realSkuToLoc: Record<string, string>): string | null {
+    if (!sku) return null
+
+    // 1. 완전 일치
     if (realSkuToLoc[sku]) return realSkuToLoc[sku]
-    const skuNs = sku.replace(/\s+/g, '')
+
+    // PDF SKU 정규화
+    const skuNorm = normalizeSku(sku)
+
     for (const [rsku, loc] of Object.entries(realSkuToLoc)) {
-      if (rsku.replace(/\s+/g, '') === skuNs) return loc
-      const base = rsku.replace(/-?1Pack(-JP)?$/i, '').replace(/\s+/g, '')
-      if (base.length > 5 && (skuNs.includes(base) || base.includes(skuNs))) return loc
+      // 2. 공백 제거 일치
+      if (rsku.replace(/\s+/g, '') === sku.replace(/\s+/g, '')) return loc
+
+      // 3~4. 하이픈+suffix 제거 후 일치
+      const rskuNorm = normalizeSku(rsku)
+      if (rskuNorm === skuNorm && rskuNorm.length > 5) return loc
+
+      // 5. PDF SKU가 마스터 SKU를 포함하거나 그 반대 (부분 매칭)
+      //    단, 너무 짧은 건 제외 (오탐 방지)
+      if (skuNorm.length > 8 && rskuNorm.length > 8) {
+        if (skuNorm.includes(rskuNorm) || rskuNorm.includes(skuNorm)) return loc
+      }
     }
     return null
   }
@@ -302,6 +338,7 @@ export default function ShipmentApp() {
             file: f.name,
             page: i + 1,
             skusOnPage: uniqueSkus,
+            skusNorm: uniqueSkus.map(s => normalizeSku(s)),
             matchedLoc: matchedLocs.join(', ') || null,
             labelCount: totalLabels,
           })
@@ -315,10 +352,10 @@ export default function ShipmentApp() {
       }
 
       setLabelDebug(debugLog)
+      setShowDebug(true)  // 항상 디버그 패널 열기 (성공/실패 무관)
 
       if (!Object.keys(locMap).length) {
-        setLabelStatus("매칭 실패 — 마스터의 SKU(realSku) 값이 PDF 내부 텍스트와 일치하는지 확인하세요")
-        setShowDebug(true)
+        setLabelStatus("매칭 실패 — 아래 디버그 패널에서 PDF 내 SKU 텍스트 확인")
         return
       }
 
@@ -496,25 +533,48 @@ export default function ShipmentApp() {
           {labelDebug.length>0&&(
             <div>
               <button onClick={()=>setShowDebug(v=>!v)} style={{fontSize:11,padding:"4px 12px",cursor:"pointer",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",background:"transparent",color:"var(--color-text-secondary)",marginBottom:8,display:"flex",alignItems:"center",gap:6}}>
-                <span>{showDebug?"▲":"▼"}</span><span>디버그 패널</span>
-                <span style={{padding:"1px 6px",borderRadius:10,background:"rgba(16,185,129,0.15)",color:"var(--color-text-success)",fontSize:10}}>✅ {labelDebug.filter(d=>d.matchedLoc).length}</span>
-                <span style={{padding:"1px 6px",borderRadius:10,background:"rgba(239,68,68,0.1)",color:"var(--color-text-danger)",fontSize:10}}>❌ {labelDebug.filter(d=>!d.matchedLoc).length}</span>
+                <span>{showDebug?"▲":"▼"}</span><span>디버그 패널 (PDF 내 SKU 원문 확인용)</span>
+                <span style={{padding:"1px 6px",borderRadius:10,background:"rgba(16,185,129,0.15)",color:"var(--color-text-success)",fontSize:10}}>✅ {labelDebug.filter(d=>d.matchedLoc).length}페이지 매칭</span>
+                <span style={{padding:"1px 6px",borderRadius:10,background:"rgba(239,68,68,0.1)",color:"var(--color-text-danger)",fontSize:10}}>❌ {labelDebug.filter(d=>!d.matchedLoc).length}페이지 미매칭</span>
               </button>
               {showDebug&&(
                 <div style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",overflow:"hidden",fontSize:11}}>
-                  <div style={{maxHeight:360,overflowY:"auto"}}>
+                  {/* 마스터 SKU 비교 참고표 */}
+                  <div style={{padding:"8px 12px",background:"rgba(219,234,254,0.3)",borderBottom:"1px solid var(--color-border-tertiary)",fontSize:10}}>
+                    <span style={{fontWeight:500,marginRight:8}}>마스터 realSku 정규화 값:</span>
+                    {Object.values(master).filter(m=>m.sku&&m.loc).map(m=>(
+                      <span key={m.sku} style={{marginRight:6,padding:"1px 5px",borderRadius:4,background:"rgba(219,234,254,0.5)",fontFamily:"var(--font-mono)"}}>
+                        {normalizeSku(m.sku)}
+                      </span>
+                    ))}
+                  </div>
+                  <div style={{maxHeight:400,overflowY:"auto"}}>
                     <table style={{width:"100%",borderCollapse:"collapse"}}>
-                      <thead><tr style={{position:"sticky",top:0}}>{["파일","P","페이지 내 SKU","라벨수","BOX CODE"].map(h=>(<th key={h} style={{...TH,fontSize:10,padding:"5px 8px"}}>{h}</th>))}</tr></thead>
+                      <thead>
+                        <tr style={{position:"sticky",top:0}}>
+                          <th style={{...TH,fontSize:10,padding:"5px 8px"}}>파일</th>
+                          <th style={{...TH,fontSize:10,padding:"5px 8px",textAlign:"right"}}>P</th>
+                          <th style={{...TH,fontSize:10,padding:"5px 8px"}}>PDF 원문 SKU</th>
+                          <th style={{...TH,fontSize:10,padding:"5px 8px"}}>정규화 (매칭용)</th>
+                          <th style={{...TH,fontSize:10,padding:"5px 8px",textAlign:"center"}}>라벨수</th>
+                          <th style={{...TH,fontSize:10,padding:"5px 8px"}}>BOX CODE</th>
+                        </tr>
+                      </thead>
                       <tbody>
-                        {labelDebug.map((d,i)=>(<tr key={i} style={{background:d.matchedLoc?(i%2===0?"transparent":"var(--color-background-secondary)"):"rgba(254,202,202,0.25)"}}>
-                          <td style={{...TD,fontSize:10,color:"var(--color-text-tertiary)",maxWidth:140,padding:"3px 8px"}}>{d.file}</td>
+                        {labelDebug.map((d,i)=>(<tr key={i} style={{background:d.matchedLoc?(i%2===0?"transparent":"var(--color-background-secondary)"):"rgba(254,202,202,0.3)"}}>
+                          <td style={{...TD,fontSize:10,color:"var(--color-text-tertiary)",maxWidth:130,padding:"3px 8px"}}>{d.file}</td>
                           <td style={{...TD,fontSize:10,textAlign:"right",padding:"3px 8px"}}>{d.page}</td>
-                          <td style={{...TD,fontSize:10,fontFamily:"var(--font-mono)",padding:"3px 8px",maxWidth:280}}>
-                            {d.skusOnPage.join(' / ')||"—"}
-                            {d.skusOnPage.length>1&&<span style={{marginLeft:4,padding:"1px 5px",borderRadius:8,background:"rgba(234,179,8,0.15)",color:"#92400e",fontSize:9}}>혼합</span>}
+                          <td style={{...TD,fontSize:10,fontFamily:"var(--font-mono)",padding:"3px 8px",maxWidth:220,color:d.matchedLoc?"var(--color-text-primary)":"var(--color-text-danger)"}}>
+                            {d.skusOnPage.join(' / ')||"(SKU 없음)"}
+                            {d.skusOnPage.length>1&&<span style={{marginLeft:4,padding:"1px 4px",borderRadius:4,background:"rgba(234,179,8,0.2)",color:"#92400e",fontSize:9}}>혼합</span>}
+                          </td>
+                          <td style={{...TD,fontSize:10,fontFamily:"var(--font-mono)",padding:"3px 8px",maxWidth:200,color:"var(--color-text-secondary)"}}>
+                            {d.skusNorm.join(' / ')||"—"}
                           </td>
                           <td style={{...TD,fontSize:10,textAlign:"center",padding:"3px 8px"}}>{d.labelCount}</td>
-                          <td style={{...TD,fontSize:10,color:"var(--color-text-info)",padding:"3px 8px"}}>{d.matchedLoc||<span style={{color:"var(--color-text-danger)"}}>❌ 없음</span>}</td>
+                          <td style={{...TD,fontSize:10,padding:"3px 8px",color:d.matchedLoc?"var(--color-text-info)":"var(--color-text-danger)",fontWeight:d.matchedLoc?500:400}}>
+                            {d.matchedLoc||"❌ 미매칭"}
+                          </td>
                         </tr>))}
                       </tbody>
                     </table>
