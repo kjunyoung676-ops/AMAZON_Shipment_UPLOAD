@@ -234,13 +234,38 @@ export default function ShipmentApp() {
         if (m.sku && m.loc) realSkuToLocMap[m.sku] = m.loc
       }
 
+      // ── 파일명 prefix → LOC 매칭 맵 구성 ──────────────────
+      // 파일명: "FBA15G97HNPC-xxxxxxxxxx.pdf" → prefix "FBA15G97HNPC"
+      // s2meta[약호].fbaId = "FBA15G97HNPCU000001" → prefix "FBA15G97HNPC"
+      // prefix가 일치하면 해당 약호의 loc를 사용
+      const fbaIdPrefixToLoc: Record<string, string> = {}
+      for (const [sku, meta] of Object.entries(s2meta)) {
+        const fbaId = meta.fbaId?.trim()
+        if (!fbaId) continue
+        // FBA ID에서 U+숫자 suffix 제거 → prefix 추출
+        // 예: FBA15G97HNPCU000001 → FBA15G97HNPC
+        const prefix = fbaId.replace(/U\d+$/, '').toUpperCase()
+        if (prefix.length > 5) {
+          const loc = master[sku]?.loc
+          if (loc) fbaIdPrefixToLoc[prefix] = loc
+        }
+      }
+
+      // 파일명에서 prefix 추출하는 함수
+      // 예: "FBA15G97HNPC-1777530666990.pdf" → "FBA15G97HNPC"
+      function getPrefixFromFilename(filename: string): string {
+        const base = filename.replace(/\.pdf$/i, '')
+        const dashIdx = base.indexOf('-')
+        return dashIdx > 0 ? base.slice(0, dashIdx).toUpperCase() : base.toUpperCase()
+      }
+
       const pdfjsLib = await loadPdfjs()
       const { PDFDocument, rgb } = await import('pdf-lib')
 
       type PageEntry = {
-        fileBytes: Uint8Array      // 원본 PDF 바이트 (Uint8Array, 매번 slice로 복사)
-        pageIdx: number            // 0-based
-        labelsToKeep: number[]     // 유지할 라벨 인덱스 (빈 배열 = 전체 유지)
+        fileBytes: Uint8Array
+        pageIdx: number
+        labelsToKeep: number[]
         totalLabels: number
       }
 
@@ -260,6 +285,11 @@ export default function ShipmentApp() {
       for (const f of files) {
         const fileBytes = new Uint8Array(await f.arrayBuffer())
         const pdf = await pdfjsLib.getDocument({ data: fileBytes.slice() }).promise
+
+        // ── 파일 단위 FBA ID prefix 매칭 ─────────────────────
+        // pdfjs가 폰트를 못 읽어 SKU가 추출 안 되는 경우의 폴백
+        const filenamePrefix = getPrefixFromFilename(f.name)
+        const locFromFilename = fbaIdPrefixToLoc[filenamePrefix] ?? null
 
         for (let i = 0; i < pdf.numPages; i++) {
           const page = await pdf.getPage(i + 1)
@@ -324,8 +354,8 @@ export default function ShipmentApp() {
             if (sku) labelInfos.push({ sku, y, x })
           } // end for j
 
-          // fallback: 単一のSKU 마커가 전혀 안 읽히는 경우
-          // → 전체 텍스트에서 마스터 realSku를 직접 탐색
+
+          // fallback 1: 전체 텍스트에서 마스터 realSku 직접 탐색
           if (labelInfos.length === 0) {
             const fullNoSp = items.map((it: {str:string}) => (it.str||'')).join('').replace(/\s+/g,'').toUpperCase()
             const matchedSkus: string[] = []
@@ -335,14 +365,28 @@ export default function ShipmentApp() {
               if (norm.length < 6) continue
               if (fullNoSp.includes(norm)) matchedSkus.push(m.sku)
             }
-            // 각 SKU를 가상의 라벨로 추가 (위치 정보 없음 → 전체 페이지로 간주)
             const unique = [...new Set(matchedSkus)]
             unique.forEach((sku, idx) => labelInfos.push({ sku, y: 10000 - idx * 40, x: idx % 2 === 0 ? 0 : 1000 }))
           }
 
+          // fallback 2: 파일명 FBA ID prefix → LOC 직접 매칭
+          // (pdfjs가 일본어 폰트를 못 읽어 SKU가 전혀 안 보이는 경우)
+          if (labelInfos.length === 0 && locFromFilename) {
+            // 페이지 내 FBA 라벨 ID 개수로 라벨 수 추정
+            const rawText = items.map((it: {str:string}) => (it.str||'')).join('')
+            const fbaMatches = rawText.match(/FBA\d{2}[A-Z0-9]+U\d+/g) || []
+            const labelCount = fbaMatches.length || 6 // 기본 6개 (3×2 그리드)
+            // 가상 라벨로 추가 (혼합 페이지 마스킹 없이 전체 페이지 포함)
+            labelInfos.push({ sku: `__fbaPrefix__${locFromFilename}`, y: 10000, x: 0 })
+          }
+
           if (labelInfos.length === 0) {
-            const rawText = items.map((it: {str:string}) => (it.str||'')).join('').slice(0, 60)
-            debugLog.push({ file: f.name, page: i + 1, skusOnPage: [], skusNorm: [], matchedLoc: null, labelCount: 0, note: `SKU not found. rawText: ${rawText}` })
+            const rawText = items.map((it: {str:string}) => (it.str||'')).join('').slice(0, 80)
+            debugLog.push({
+              file: f.name, page: i + 1, skusOnPage: [], skusNorm: [],
+              matchedLoc: null, labelCount: 0,
+              note: `SKU not found. fbaPrefix=${filenamePrefix}(no fbaId match). rawText: ${rawText}`
+            })
             processed++
             continue
           }
@@ -358,17 +402,15 @@ export default function ShipmentApp() {
 
           // SKU별 처리
           for (const targetSku of uniqueSkus) {
-            const loc = skuToLoc(targetSku, realSkuToLocMap)
+            // __fbaPrefix__ 가상 SKU 처리 (파일명 매칭)
+            const loc = targetSku.startsWith('__fbaPrefix__')
+              ? targetSku.replace('__fbaPrefix__', '')
+              : skuToLoc(targetSku, realSkuToLocMap)
             if (!loc) continue
 
-            // 해당 SKU의 라벨 인덱스
             const keptIndices = labelInfos
               .map((l, idx) => ({ l, idx }))
-              .filter(({ l }) => {
-                const ls = l.sku.replace(/\s+/g, '')
-                const ts = targetSku.replace(/\s+/g, '')
-                return ls === ts
-              })
+              .filter(({ l }) => l.sku === targetSku)
               .map(({ idx }) => idx)
 
             if (!locMap[loc]) locMap[loc] = []
@@ -380,14 +422,20 @@ export default function ShipmentApp() {
             })
           }
 
-          const matchedLocs = uniqueSkus.map(s => skuToLoc(s, realSkuToLocMap)).filter(Boolean)
+          const matchedLocs = uniqueSkus.map(s =>
+            s.startsWith('__fbaPrefix__') ? s.replace('__fbaPrefix__', '') : skuToLoc(s, realSkuToLocMap)
+          ).filter(Boolean)
+          const displaySkus = uniqueSkus.map(s =>
+            s.startsWith('__fbaPrefix__') ? `[파일명매칭:${filenamePrefix}]` : s
+          )
           debugLog.push({
             file: f.name,
             page: i + 1,
-            skusOnPage: uniqueSkus,
-            skusNorm: uniqueSkus.map(s => normalizeSku(s)),
+            skusOnPage: displaySkus,
+            skusNorm: displaySkus.map(s => s.startsWith('[') ? s : normalizeSku(s)),
             matchedLoc: matchedLocs.join(', ') || null,
             labelCount: totalLabels,
+            note: uniqueSkus.some(s => s.startsWith('__fbaPrefix__')) ? `파일명 prefix 매칭: ${filenamePrefix} → ${locFromFilename}` : undefined,
           })
 
           processed++
