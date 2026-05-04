@@ -658,7 +658,7 @@ export default function ShipmentApp() {
           pdf2.destroy()
 
           if (detectedFbaId && maxPlt > 0) {
-            const pltRange = `1~${maxPlt}番`
+            const pltRange = `1 ~ ${maxPlt}`
             // 해당 FBA ID를 가진 약호 찾아 pltNotes 업데이트
             for (const [sku, meta] of Object.entries(s2meta)) {
               const metaFbaId = meta.fbaId?.replace(/U\d+$/, '').toUpperCase()
@@ -675,11 +675,11 @@ export default function ShipmentApp() {
             const pltKey = `__PLT__${detectedFc||detectedFbaId}`
             if (!result[pltKey]) {
               const pltDoc = await PDFDocument.create()
-              await makePalletCoverPage(pltDoc, detectedFbaId, detectedFc, `1~${maxPlt}番`)
+              await makePalletCoverPage(pltDoc, detectedFbaId, detectedFc, `Pallet 1 ~ ${maxPlt}`)
               const srcPlt = await PDFDocument.load(bytes.slice())
               const pltPages = await pltDoc.copyPages(srcPlt, Array.from({length: srcPlt.getPageCount()}, (_,i)=>i))
               pltPages.forEach(p => pltDoc.addPage(p))
-              await makePalletCoverPage(pltDoc, detectedFbaId, detectedFc, `1~${maxPlt}番`)
+              await makePalletCoverPage(pltDoc, detectedFbaId, detectedFc, `Pallet 1 ~ ${maxPlt}`)
               result[pltKey] = await pltDoc.save()
               counts[pltKey] = maxPlt
             }
@@ -982,6 +982,7 @@ export default function ShipmentApp() {
               <span style={{fontSize:12,color:"var(--color-text-secondary)"}}>라벨 배송 정보 정리 · 컨테이너별 분류 · FC센터 표시</span>
               <button onClick={expLogistics} style={{marginLeft:"auto",fontSize:11,padding:"3px 10px"}}>xlsx 저장</button>
             </div>
+            <SheetTabs/>
 
             {!file ? (
               <div style={{textAlign:"center",padding:"4rem 0",color:"var(--color-text-tertiary)"}}>
@@ -1017,7 +1018,7 @@ export default function ShipmentApp() {
                               {["약호","신박스코드","카톤수량","파렛트당카톤","파렛트","FC센터"].map(h=>(
                                 <th key={h} style={TH}>{h}</th>
                               ))}
-                              <th style={{...TH,...IBLU}}>파렛트 번호 <span style={{fontSize:9,fontWeight:400,color:"var(--color-text-tertiary)"}}>(직접입력)</span></th>
+                              <th style={{...TH,...IBLU}}>파렛트 번호 <span style={{fontSize:9,fontWeight:400,color:"var(--color-text-info)"}}>(파렛트 라벨 업로드시 자동입력)</span></th>
                             </tr>
                           </thead>
                           <tbody>
@@ -1036,12 +1037,9 @@ export default function ShipmentApp() {
                                   <td style={{...TD,textAlign:"right",fontWeight:500,minWidth:50}}>{pallets}</td>
                                   <td style={{...TD,minWidth:60,fontWeight:500,color:meta.fc?"var(--color-text-primary)":"var(--color-text-tertiary)"}}>{meta.fc||"—"}</td>
                                   <td style={{...TD,...IBLU,minWidth:120}}>
-                                    <input
-                                      value={pltNotes[key]||""}
-                                      onChange={e=>setPltNotes(p=>({...p,[key]:e.target.value}))}
-                                      placeholder={`예) ${pallets}번`}
-                                      style={{...INP,fontSize:11}}
-                                    />
+                                    <span style={{fontSize:11,color:pltNotes[key]?"var(--color-text-info)":"var(--color-text-tertiary)",fontFamily:"var(--font-mono)"}}>
+                                      {pltNotes[key]||`예) ${pallets}개`}
+                                    </span>
                                   </td>
                                 </tr>
                               )
