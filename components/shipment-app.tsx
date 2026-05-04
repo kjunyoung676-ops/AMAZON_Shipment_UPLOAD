@@ -212,12 +212,130 @@ export default function ShipmentApp() {
     try{const res=await fetch("/UPLOAD_FORMAT.xlsx");if(!res.ok)throw new Error("파일 로드 실패 ("+res.status+")");const buf=await res.arrayBuffer();const wb=XLSX.read(buf,{type:"array",cellStyles:true,cellNF:true,cellDates:true,sheetStubs:true});const tplName=wb.SheetNames.find(n=>n.toLowerCase().includes("template"));if(!tplName)throw new Error("template 시트를 찾을 수 없습니다: "+wb.SheetNames.join(", "));const ws=wb.Sheets[tplName];const rows=buildS2rows();rows.forEach((r,i)=>{const row=9+i;const m=master[r.sku]||({} as MasterItem);const realSku=m.sku||r.sku;const set=(col:string,t:"s"|"n",v:string|number)=>{ws[col+row]={...(ws[col+row]||{}),t,v,w:String(v)}};set("A","s",realSku);set("B","n",r.total);set("F","n",1);set("G","n",r.total);set("H","n",m.bx||0);set("I","n",m.by||0);set("J","n",m.bz||0);set("K","n",m.kg||0)});if(rows.length>0){const decoded=XLSX.utils.decode_range(ws["!ref"]||"A1:K8");decoded.e.r=Math.max(decoded.e.r,8+rows.length-1);decoded.e.c=Math.max(decoded.e.c,10);ws["!ref"]=XLSX.utils.encode_range(decoded)};XLSX.writeFile(wb,"UPLOAD_FORMAT_filled.xlsx",{cellStyles:true,compression:true})}catch(e){alert("오류: "+(e as Error).message)}finally{setFbaLoading(false)}
   }
 
+  // ── 표지 페이지 생성 (카톤 라벨) ─────────────────────────────
+  async function makeCoverPage(doc: {addPage:(s:[number,number])=>ReturnType<typeof doc.addPage>, embedFont:(f:string)=>Promise<ReturnType<typeof doc.embedFont>>}, loc: string) {
+    const { StandardFonts, rgb: pdfRgb } = await import('pdf-lib')
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const coverPage = (doc as any).addPage([595, 842])
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let font: any
+    try { font = await (doc as any).embedFont(StandardFonts.HelveticaBold) }
+    catch { font = await (doc as any).embedFont(StandardFonts.Helvetica) }
+    const realSku = locToRealSku(loc)
+    const sku = locToSku(loc)
+    coverPage.drawRectangle({ x: 0, y: 0, width: 595, height: 842, color: pdfRgb(0.97, 0.97, 0.97) })
+    const fs1 = 52, fs2 = 32, fs3 = 20
+    const w1 = font.widthOfTextAtSize(loc, fs1)
+    coverPage.drawText(loc, { x: (595 - w1) / 2, y: 480, size: fs1, font, color: pdfRgb(0.1, 0.1, 0.1) })
+    const label2 = realSku || sku || ''
+    if (label2) {
+      const w2 = font.widthOfTextAtSize(label2, fs2)
+      coverPage.drawText(label2, { x: (595 - w2) / 2, y: 410, size: fs2, font, color: pdfRgb(0.3, 0.3, 0.3) })
+    }
+    const typeLabel = 'CARTON LABEL'
+    const w3 = font.widthOfTextAtSize(typeLabel, fs3)
+    coverPage.drawText(typeLabel, { x: (595 - w3) / 2, y: 350, size: fs3, font, color: pdfRgb(0.6, 0.6, 0.6) })
+    coverPage.drawLine({ start: { x: 80, y: 340 }, end: { x: 515, y: 340 }, thickness: 1, color: pdfRgb(0.8, 0.8, 0.8) })
+  }
+
+  // ── 파렛트 표지 페이지 생성 ───────────────────────────────────
+  async function makePalletCoverPage(doc: unknown, fbaId: string, fc: string, pltRange: string) {
+    const { StandardFonts, rgb: pdfRgb } = await import('pdf-lib')
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const d = doc as any
+    const coverPage = d.addPage([595, 842])
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let font: any
+    try { font = await d.embedFont(StandardFonts.HelveticaBold) }
+    catch { font = await d.embedFont(StandardFonts.Helvetica) }
+    coverPage.drawRectangle({ x: 0, y: 0, width: 595, height: 842, color: pdfRgb(0.95, 0.97, 1.0) })
+    const lines = [
+      { text: 'PALLET LABEL', size: 20, y: 680, color: pdfRgb(0.5, 0.5, 0.5) },
+      { text: fc || 'FC', size: 48, y: 580, color: pdfRgb(0.05, 0.05, 0.2) },
+      { text: pltRange, size: 36, y: 490, color: pdfRgb(0.1, 0.1, 0.1) },
+      { text: fbaId, size: 22, y: 420, color: pdfRgb(0.35, 0.35, 0.35) },
+    ]
+    for (const l of lines) {
+      const w = font.widthOfTextAtSize(l.text, l.size)
+      coverPage.drawText(l.text, { x: Math.max(40, (595 - w) / 2), y: l.y, size: l.size, font, color: l.color })
+    }
+    coverPage.drawLine({ start: { x: 80, y: 410 }, end: { x: 515, y: 410 }, thickness: 1, color: pdfRgb(0.75, 0.75, 0.75) })
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async function loadPdfjs():Promise<any>{
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     if((window as any).pdfjsLib)return(window as any).pdfjsLib
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return new Promise<any>((resolve,reject)=>{const s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';s.onload=()=>{const lib=(window as any).pdfjsLib as any;lib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';resolve(lib)};s.onerror=reject;document.head.appendChild(s)})
+  }
+
+  // ── 파렛트 라벨만 따로 처리 (카톤 없이도 pltNotes 업데이트) ──
+  async function processPalletOnly(pltFiles: File[]) {
+    if (!pltFiles.length) return
+    setLabelLoading(true)
+    setLabelStatus("파렛트 라벨 처리 중...")
+    try {
+      const pdfjsLib = await loadPdfjs()
+      const { PDFDocument } = await import('pdf-lib')
+      const newPltNotes: Record<string, string> = { ...pltNotes }
+      const newGroups: Record<string, Uint8Array> = { ...labelGroups }
+      const newCounts: Record<string, number> = { ...labelCounts }
+
+      for (const f of pltFiles) {
+        const bytes = new Uint8Array(await f.arrayBuffer())
+        const pdf2 = await pdfjsLib.getDocument(getPdfjsOpts(bytes)).promise
+        let maxPlt = 0, detectedFbaId = '', detectedFc = ''
+
+        for (let pi = 0; pi < pdf2.numPages; pi++) {
+          const page = await pdf2.getPage(pi + 1)
+          const content = await page.getTextContent()
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const tokens = (content.items as any[]).map((it) => (it.str || '').trim()).filter(Boolean)
+          const pageText = tokens.join(' ')
+          const fbaMatch = pageText.match(/FBA[A-Z0-9]{8,12}/)
+          if (fbaMatch && !detectedFbaId) detectedFbaId = fbaMatch[0]
+          const pltMatch = pageText.match(/#[：:]\s*(\d+)\s*\/\s*(\d+)/)
+          if (pltMatch) { const total = parseInt(pltMatch[2]); if (total > maxPlt) maxPlt = total }
+          if (!detectedFbaId) { const fnMatch = f.name.match(/^(FBA[A-Z0-9]+)/); if (fnMatch) detectedFbaId = fnMatch[1] }
+          const fcMatch = pageText.match(/(?:納品先|TPB|HIY|VNB|VJNB)\s*[\s:\-]?\s*([A-Z]{3,6})\b/)
+          if (fcMatch && !detectedFc) detectedFc = fcMatch[1]
+          if (!detectedFc) { for (const tok of tokens) { if (/^[A-Z]{3,5}$/.test(tok) && !['FBA','SKU','IXD'].includes(tok)) { detectedFc = tok; break } } }
+        }
+        pdf2.destroy()
+
+        if (detectedFbaId && maxPlt > 0) {
+          const pltRange = `1~${maxPlt}`
+          const pltLabel = `${detectedFc ? detectedFc+'_' : ''}${detectedFbaId}_${pltRange}`
+          for (const [sku, meta] of Object.entries(s2meta)) {
+            const metaFbaId = meta.fbaId?.replace(/U\d+$/, '').toUpperCase()
+            const targetPrefix = detectedFbaId.replace(/U\d+$/, '').toUpperCase()
+            if (metaFbaId && metaFbaId === targetPrefix) {
+              const ctnNums2 = [...new Set(fd.map(r=>r.container_no as number))]
+              for (const no of ctnNums2) { newPltNotes[`${no}_${sku}`] = pltRange }
+            }
+          }
+          const pltKey = `__PLT__${pltLabel}`
+          const pltDoc = await PDFDocument.create()
+          await makePalletCoverPage(pltDoc, detectedFbaId, detectedFc, `Pallet ${pltRange}`)
+          const srcPlt = await PDFDocument.load(bytes.slice())
+          const pltPages = await pltDoc.copyPages(srcPlt, Array.from({length: srcPlt.getPageCount()}, (_,i)=>i))
+          pltPages.forEach(p => pltDoc.addPage(p))
+          await makePalletCoverPage(pltDoc, detectedFbaId, detectedFc, `Pallet ${pltRange}`)
+          newGroups[pltKey] = await pltDoc.save()
+          newCounts[pltKey] = maxPlt
+        }
+      }
+      setPltNotes(newPltNotes)
+      setLabelGroups(newGroups)
+      setLabelCounts(newCounts)
+      setLabelStatus(`파렛트 ${pltFiles.length}개 처리 완료 — 2-5. 물류 전달에 파렛트 번호 자동 반영됨`)
+    } catch(e) {
+      alert('파렛트 처리 오류: ' + (e as Error).message)
+      setLabelStatus("")
+    } finally {
+      setLabelLoading(false)
+    }
   }
 
   // ── SKU 정규화: 하이픈·공백·suffix 제거 후 비교용 문자열 반환 ──
@@ -516,57 +634,6 @@ export default function ShipmentApp() {
       const result: Record<string, Uint8Array> = {}
       const counts: Record<string, number> = {}
 
-      // ── 표지 페이지 생성 헬퍼 ─────────────────────────────────
-      // A4 사이즈 (595 x 842 pt), 박스코드/realSku 큰 글씨
-      async function makeCoverPage(doc: typeof PDFDocument.prototype, loc: string, isPallet = false) {
-        const { StandardFonts, rgb: pdfRgb } = await import('pdf-lib')
-        const coverPage = doc.addPage([595, 842])
-        let font: Awaited<ReturnType<typeof doc.embedFont>>
-        try { font = await doc.embedFont(StandardFonts.HelveticaBold) }
-        catch { font = await doc.embedFont(StandardFonts.Helvetica) }
-        const realSku = locToRealSku(loc)
-        const sku = locToSku(loc)
-        const label1 = loc
-        const label2 = realSku || sku || ''
-
-        // 배경 연한 회색
-        coverPage.drawRectangle({ x: 0, y: 0, width: 595, height: 842, color: pdfRgb(0.97, 0.97, 0.97) })
-        // 중앙 박스코드
-        const fs1 = 52, fs2 = 32, fs3 = 20
-        const w1 = font.widthOfTextAtSize(label1, fs1)
-        coverPage.drawText(label1, { x: (595 - w1) / 2, y: 480, size: fs1, font, color: pdfRgb(0.1, 0.1, 0.1) })
-        if (label2) {
-          const w2 = font.widthOfTextAtSize(label2, fs2)
-          coverPage.drawText(label2, { x: (595 - w2) / 2, y: 410, size: fs2, font, color: pdfRgb(0.3, 0.3, 0.3) })
-        }
-        const typeLabel = isPallet ? 'PALLET LABEL' : 'CARTON LABEL'
-        const w3 = font.widthOfTextAtSize(typeLabel, fs3)
-        coverPage.drawText(typeLabel, { x: (595 - w3) / 2, y: 350, size: fs3, font, color: pdfRgb(0.6, 0.6, 0.6) })
-        // 구분선
-        coverPage.drawLine({ start: { x: 80, y: 340 }, end: { x: 515, y: 340 }, thickness: 1, color: pdfRgb(0.8, 0.8, 0.8) })
-      }
-
-      // ── 파렛트 라벨 표지 헬퍼 (fc센터, 파렛트범위) ──────────
-      async function makePalletCoverPage(doc: typeof PDFDocument.prototype, fbaId: string, fc: string, pltRange: string) {
-        const { StandardFonts, rgb: pdfRgb } = await import('pdf-lib')
-        const coverPage = doc.addPage([595, 842])
-        let font: Awaited<ReturnType<typeof doc.embedFont>>
-        try { font = await doc.embedFont(StandardFonts.HelveticaBold) }
-        catch { font = await doc.embedFont(StandardFonts.Helvetica) }
-        coverPage.drawRectangle({ x: 0, y: 0, width: 595, height: 842, color: pdfRgb(0.95, 0.97, 1.0) })
-        const lines = [
-          { text: 'PALLET LABEL', size: 20, y: 680, color: pdfRgb(0.5, 0.5, 0.5) },
-          { text: fc, size: 48, y: 580, color: pdfRgb(0.05, 0.05, 0.2) },
-          { text: pltRange, size: 36, y: 490, color: pdfRgb(0.1, 0.1, 0.1) },
-          { text: fbaId, size: 22, y: 420, color: pdfRgb(0.35, 0.35, 0.35) },
-        ]
-        for (const l of lines) {
-          const w = font.widthOfTextAtSize(l.text, l.size)
-          coverPage.drawText(l.text, { x: Math.max(40, (595 - w) / 2), y: l.y, size: l.size, font, color: l.color })
-        }
-        coverPage.drawLine({ start: { x: 80, y: 410 }, end: { x: 515, y: 410 }, thickness: 1, color: pdfRgb(0.75, 0.75, 0.75) })
-      }
-
       for (const [loc, entries] of Object.entries(locMap)) {
         let totalKept = 0
         const outDoc = await PDFDocument.create()
@@ -658,7 +725,8 @@ export default function ShipmentApp() {
           pdf2.destroy()
 
           if (detectedFbaId && maxPlt > 0) {
-            const pltRange = `1 ~ ${maxPlt}`
+            const pltRange = `1~${maxPlt}`
+            const pltLabel = `${detectedFc ? detectedFc+'_' : ''}${detectedFbaId}_${pltRange}`
             // 해당 FBA ID를 가진 약호 찾아 pltNotes 업데이트
             for (const [sku, meta] of Object.entries(s2meta)) {
               const metaFbaId = meta.fbaId?.replace(/U\d+$/, '').toUpperCase()
@@ -671,21 +739,23 @@ export default function ShipmentApp() {
                 }
               }
             }
-            // 파렛트 라벨 PDF도 표지 달아서 결과에 포함
-            const pltKey = `__PLT__${detectedFc||detectedFbaId}`
+            // 파렛트 라벨 PDF 표지 달아서 결과에 포함 — key를 FC_FBAID_range 형태로
+            const pltKey = `__PLT__${pltLabel}`
             if (!result[pltKey]) {
               const pltDoc = await PDFDocument.create()
-              await makePalletCoverPage(pltDoc, detectedFbaId, detectedFc, `Pallet 1 ~ ${maxPlt}`)
+              await makePalletCoverPage(pltDoc, detectedFbaId, detectedFc, `Pallet ${pltRange}`)
               const srcPlt = await PDFDocument.load(bytes.slice())
               const pltPages = await pltDoc.copyPages(srcPlt, Array.from({length: srcPlt.getPageCount()}, (_,i)=>i))
               pltPages.forEach(p => pltDoc.addPage(p))
-              await makePalletCoverPage(pltDoc, detectedFbaId, detectedFc, `Pallet 1 ~ ${maxPlt}`)
+              await makePalletCoverPage(pltDoc, detectedFbaId, detectedFc, `Pallet ${pltRange}`)
               result[pltKey] = await pltDoc.save()
               counts[pltKey] = maxPlt
             }
           }
         }
         setPltNotes(newPltNotes)
+      } else if (Object.keys(newPltNotes ?? {}).length === 0 && pltFiles.length === 0) {
+        // 파렛트 파일 없이 카톤만 처리한 경우 기존 pltNotes 유지
       }
 
       setLabelGroups(result)
@@ -717,11 +787,18 @@ export default function ShipmentApp() {
     return (realSku||sku) ? `${loc} (${realSku||sku})` : loc
   }
   function dlLabel(loc: string, bytes: Uint8Array) {
-    const realSku = locToRealSku(loc)
-    const sku = locToSku(loc)
+    const isPlt = loc.startsWith('__PLT__')
+    let filename: string
+    if (isPlt) {
+      filename = loc.replace('__PLT__', '') + '.pdf'
+    } else {
+      const realSku = locToRealSku(loc)
+      const sku = locToSku(loc)
+      filename = `${loc} (${realSku||sku||loc}).pdf`
+    }
     const a = document.createElement('a')
     a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }))
-    a.download = `${loc} (${realSku||sku||loc}).pdf`
+    a.download = filename
     a.click()
   }
   function dlAllLabels(){Object.entries(labelGroups).forEach(([l,b])=>dlLabel(l,b))}
@@ -838,11 +915,11 @@ export default function ShipmentApp() {
             {/* 파렛트 라벨 드롭존 */}
             <div>
               <div style={{fontSize:11,color:"var(--color-text-tertiary)",marginBottom:6,fontWeight:500}}>파렛트 라벨 PDF <span style={{color:"var(--color-text-info)"}}>→ 파렛트 번호 자동 인식</span></div>
-              <div onClick={()=>!labelLoading&&pltLabelRef.current?.click()} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();const fs=Array.from(e.dataTransfer.files).filter(f=>f.type==='application/pdf');if(fs.length&&!labelLoading){setPltLabelFiles(fs);if(labelFiles.length)processLabels(labelFiles,fs)}}} style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"24px 16px",border:"1px dashed var(--color-border-info)",borderRadius:"var(--border-radius-md)",cursor:labelLoading?"default":"pointer",gap:6,background:pltLabelFiles.length?"rgba(219,234,254,0.15)":"transparent",minHeight:100}}>
+              <div onClick={()=>!labelLoading&&pltLabelRef.current?.click()} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();const fs=Array.from(e.dataTransfer.files).filter(f=>f.type==='application/pdf');if(fs.length&&!labelLoading){setPltLabelFiles(fs);processPalletOnly(fs)}}} style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"24px 16px",border:"1px dashed var(--color-border-info)",borderRadius:"var(--border-radius-md)",cursor:labelLoading?"default":"pointer",gap:6,background:pltLabelFiles.length?"rgba(219,234,254,0.15)":"transparent",minHeight:100}}>
                 <span style={{fontSize:28}}>{pltLabelFiles.length?"🏷️":"📋"}</span>
-                <span style={{fontSize:12,color:"var(--color-text-secondary)",textAlign:"center"}}>{pltLabelFiles.length?`${pltLabelFiles.length}개 파일 — FBA ID/FC센터/파렛트번호 자동 추출`:"파렛트 라벨 업로드 (선택)"}</span>
+                <span style={{fontSize:12,color:"var(--color-text-secondary)",textAlign:"center"}}>{pltLabelFiles.length?`${pltLabelFiles.length}개 파일 — 파렛트 번호 자동 반영됨`:"파렛트 라벨 업로드 (업로드 즉시 2-5에 반영)"}</span>
               </div>
-              <input ref={pltLabelRef} type="file" accept="application/pdf" multiple style={{display:"none"}} onChange={e=>{const fs=Array.from(e.target.files||[]);if(fs.length){setPltLabelFiles(fs);if(labelFiles.length)processLabels(labelFiles,fs)}}}/>
+              <input ref={pltLabelRef} type="file" accept="application/pdf" multiple style={{display:"none"}} onChange={e=>{const fs=Array.from(e.target.files||[]);if(fs.length){setPltLabelFiles(fs);processPalletOnly(fs)}}}/>
             </div>
           </div>
           {Object.keys(labelGroups).length>0&&!labelLoading&&(
@@ -976,11 +1053,85 @@ export default function ShipmentApp() {
           xlsDl([...hdr, ...body], '물류전달', '물류전달_' + new Date().toISOString().slice(0,10) + '.xlsx')
         }
 
+        function printLogistics() {
+          const groups2 = buildS3groups()
+          const rows: {ctn:string, sku:string, loc:string, qty:number, cpp:number, pallets:number, fc:string, plt:string}[] = []
+          for (const g of groups2) {
+            for (const r of g.rows) {
+              const m = master[String(r.sku)] || {} as MasterItem
+              const cpp = parseFloat(String(m.cpp)) || 16
+              const pallets = Math.ceil(r.quantity / cpp)
+              const meta = s2meta[String(r.sku)] || {}
+              const key = `${g.no}_${String(r.sku)}`
+              rows.push({ ctn:`컨${g.no}`, sku:String(r.sku), loc:String(r.location||m.loc||''), qty:r.quantity, cpp, pallets, fc:meta.fc||'', plt:pltNotes[key]||'' })
+            }
+          }
+
+          // 컨테이너별로 그룹핑 후 중복 컨번 제거
+          let lastCtn = ''
+          const tbodyRows = rows.map(r => {
+            const showCtn = r.ctn !== lastCtn
+            lastCtn = r.ctn
+            return `<tr class="${r.fc==='HIY1'?'hiy':'tpb'}">
+              <td class="ctn">${showCtn ? r.ctn : ''}</td>
+              <td>${r.sku}</td>
+              <td class="loc">${r.loc}</td>
+              <td class="num">${r.qty.toLocaleString()}</td>
+              <td class="num">${r.cpp}</td>
+              <td class="num bold">${r.pallets}</td>
+              <td class="fc">${r.fc}</td>
+              <td class="plt">${r.plt}</td>
+            </tr>`
+          }).join('')
+
+          const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+  body{font-family:Arial,sans-serif;font-size:11px;margin:20px}
+  h2{font-size:14px;margin-bottom:8px}
+  table{border-collapse:collapse;width:100%}
+  th,td{border:1px solid #999;padding:4px 6px;white-space:nowrap}
+  th{background:#333;color:#fff;text-align:center;font-size:10px}
+  .subhead th{background:#666}
+  td.num{text-align:right}
+  td.ctn{font-weight:bold;background:#f5f5f5;text-align:center}
+  td.loc{color:#1a56db;font-weight:bold}
+  td.fc{font-weight:bold;text-align:center}
+  td.plt{color:#1a56db;text-align:center}
+  td.bold{font-weight:bold}
+  tr.hiy td{background:rgba(219,234,254,0.25)}
+  tr.tpb td{background:rgba(209,250,229,0.25)}
+  tr.hiy td.ctn, tr.tpb td.ctn{background:#f5f5f5}
+  @media print{body{margin:10px}h2{font-size:12px}}
+</style>
+</head><body>
+<h2>물류 전달 — ${activeSheet||''}</h2>
+<table>
+  <thead>
+    <tr>
+      <th colspan="6" style="background:#444">카톤 라벨</th>
+      <th colspan="2" style="background:#1a56db">파렛트 라벨</th>
+    </tr>
+    <tr class="subhead">
+      <th>컨테이너</th><th>약호</th><th>신박스코드</th>
+      <th>카톤수량</th><th>파렛트당카톤</th><th>파렛트</th>
+      <th>FC센터</th><th>파렛트번호</th>
+    </tr>
+  </thead>
+  <tbody>${tbodyRows}</tbody>
+</table>
+</body></html>`
+
+          const w = window.open('', '_blank')
+          if (w) { w.document.write(html); w.document.close(); setTimeout(()=>w.print(), 300) }
+        }
+
         return (
           <div>
             <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14,flexWrap:"wrap"}}>
               <span style={{fontSize:12,color:"var(--color-text-secondary)"}}>라벨 배송 정보 정리 · 컨테이너별 분류 · FC센터 표시</span>
-              <button onClick={expLogistics} style={{marginLeft:"auto",fontSize:11,padding:"3px 10px"}}>xlsx 저장</button>
+              <button onClick={printLogistics} style={{marginLeft:"auto",fontSize:11,padding:"3px 10px",cursor:"pointer",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",background:"transparent"}}>🖨 인쇄</button>
+              <button onClick={expLogistics} style={{fontSize:11,padding:"3px 10px"}}>xlsx 저장</button>
             </div>
             <SheetTabs/>
 
