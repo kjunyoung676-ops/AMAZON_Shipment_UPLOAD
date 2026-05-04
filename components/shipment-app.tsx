@@ -123,6 +123,9 @@ export default function ShipmentApp() {
   useEffect(()=>{lsSave("ctnMeta",ctnMeta)},[ctnMeta])
   const [coll,setColl]=useState<Record<string,boolean>>({})
   const [newSku,setNewSku]=useState({...EMPTY_SKU})
+  // 파렛트 번호 수기 입력 state: key = "ctnNo_sku"
+  const [pltNotes,setPltNotes]=useState<Record<string,string>>(()=>lsLoad("pltNotes",{}))
+  useEffect(()=>{lsSave("pltNotes",pltNotes)},[pltNotes])
   const [fbaLoading,setFbaLoading]=useState(false)
   const [labelFiles,setLabelFiles]=useState<File[]>([])
   const [labelGroups,setLabelGroups]=useState<Record<string,Uint8Array>>({})
@@ -780,130 +783,111 @@ export default function ShipmentApp() {
 
       {/* ══ ②.5 물류 전달 ══ */}
       {mode==='logistics'&&(()=>{
-        // FC센터별로 SKU를 그룹핑
-        // s2rows에서 fbaId, fc, address, amazonId 가져와 파렛트 정보 계산
-        type LogRow = {
-          sku: string; asin: string; loc: string; qty: number; cpp: number
-          pallets: number; fbaId: string; amazonId: string; fc: string; address: string
-        }
-        const logRows: LogRow[] = s2rows.map(r => {
-          const meta = s2meta[r.sku] || {}
-          return {
-            sku: r.sku, asin: r.asin, loc: r.loc, qty: r.total,
-            cpp: r.cpp, pallets: r.pallets,
-            fbaId: meta.fbaId || '', amazonId: meta.amazonId || '',
-            fc: meta.fc || '', address: meta.address || '',
-          }
-        }).filter(r => r.qty > 0)
-
-        // FC센터 목록 (fbaId 있는 것 우선, 없으면 fc 기준)
-        const fcGroups: Record<string, LogRow[]> = {}
-        for (const r of logRows) {
-          const key = r.fc || '(FC 미입력)'
-          if (!fcGroups[key]) fcGroups[key] = []
-          fcGroups[key].push(r)
-        }
-
-        // 파렛트 누적 번호 계산
-        let pltSeq = 0
-        const pltRanges: Record<string, string> = {}
-        for (const rows of Object.values(fcGroups)) {
-          for (const r of rows) {
-            const start = pltSeq + 1
-            pltSeq += r.pallets
-            pltRanges[r.sku] = `${start}번${r.pallets > 1 ? `~${pltSeq}번` : ''}`
-          }
-        }
+        // 컨테이너별로 묶고, 각 행에 약호별 FC센터 표시
+        // 필요 컬럼: 약호, ASIN, 신박스코드, 카톤수량, 파렛트당카톤, 파렛트, FC센터, 파렛트번호(수기)
+        const groups = buildS3groups()
 
         function expLogistics() {
-          const hdr = [['약호','ASIN','신박스코드','카톤수량','파렛트당카톤','파렛트','배송ID','아마존참조ID','FC센터','주소','파렛트번호']]
-          const body = logRows.map(r => [r.sku, r.asin, r.loc, r.qty, r.cpp, r.pallets, r.fbaId, r.amazonId, r.fc, r.address, pltRanges[r.sku]||''])
-          xlsDl([...hdr, ...body], '물류전달', '물류전달_'+new Date().toISOString().slice(0,10)+'.xlsx')
+          const hdr = [['컨테이너','약호','ASIN','신박스코드','카톤수량','파렛트당카톤','파렛트','FC센터','파렛트번호']]
+          const body: unknown[][] = []
+          for (const g of groups) {
+            for (const r of g.rows) {
+              const m = master[String(r.sku)] || {} as MasterItem
+              const cpp = parseFloat(String(m.cpp)) || 16
+              const pallets = Math.ceil(r.quantity / cpp)
+              const meta = s2meta[String(r.sku)] || {}
+              const key = `${g.no}_${String(r.sku)}`
+              body.push([
+                g.container || `컨${g.no}`,
+                String(r.sku), m.asin || '',
+                String(r.location || m.loc || ''),
+                r.quantity, cpp, pallets,
+                meta.fc || '', pltNotes[key] || ''
+              ])
+            }
+          }
+          xlsDl([...hdr, ...body], '물류전달', '물류전달_' + new Date().toISOString().slice(0,10) + '.xlsx')
         }
 
         return (
           <div>
             <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14,flexWrap:"wrap"}}>
-              <span style={{fontSize:12,color:"var(--color-text-secondary)"}}>라벨 배송 정보 정리 · FC센터별 파렛트 분류</span>
-              <span style={{fontSize:11,padding:"2px 8px",borderRadius:12,background:"rgba(219,234,254,0.4)",color:"var(--color-text-info)",border:"0.5px solid var(--color-border-info)"}}>파렛트 번호는 직접 입력</span>
+              <span style={{fontSize:12,color:"var(--color-text-secondary)"}}>라벨 배송 정보 정리 · 컨테이너별 분류 · FC센터 표시</span>
               <button onClick={expLogistics} style={{marginLeft:"auto",fontSize:11,padding:"3px 10px"}}>xlsx 저장</button>
             </div>
 
-            {logRows.length === 0 ? (
+            {!file ? (
               <div style={{textAlign:"center",padding:"4rem 0",color:"var(--color-text-tertiary)"}}>
                 <div style={{fontSize:36,marginBottom:12}}>📋</div>
-                <p>1차 가공에서 파일을 업로드하고 FBA ID / FC CENTER를 입력해주세요</p>
+                <p>파일을 먼저 업로드하고 1차 가공에서 FC CENTER를 입력해주세요</p>
               </div>
             ) : (
-              <div style={{display:"flex",flexDirection:"column",gap:16}}>
-                {Object.entries(fcGroups).map(([fc, rows], gi) => {
-                  const ci = gi % CB.length
-                  const fcPallets = rows.reduce((s,r)=>s+r.pallets,0)
-                  const fcQty = rows.reduce((s,r)=>s+r.qty,0)
-                  const sampleRow = rows.find(r=>r.fbaId) || rows[0]
+              <div style={{display:"flex",flexDirection:"column",gap:12}}>
+                {groups.map((g) => {
+                  const ci = (g.no - 1) % CB.length
+                  const sumQ = g.rows.reduce((s,r)=>s+r.quantity, 0)
+                  const sumP = g.rows.reduce((s,r)=>{
+                    const cpp = parseFloat(String((master[String(r.sku)]||{}).cpp))||16
+                    return s + Math.ceil(r.quantity/cpp)
+                  }, 0)
                   return (
-                    <div key={fc} style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",overflow:"hidden"}}>
-                      {/* FC 헤더 */}
-                      <div style={{background:CB[ci],color:CT[ci],padding:"10px 16px",display:"flex",alignItems:"flex-start",gap:16,flexWrap:"wrap"}}>
-                        <div>
-                          <div style={{fontWeight:600,fontSize:14}}>{fc}</div>
-                          <div style={{fontSize:11,opacity:0.8,marginTop:2,whiteSpace:"pre-line"}}>{sampleRow?.address||""}</div>
-                        </div>
-                        <div style={{marginLeft:"auto",textAlign:"right"}}>
-                          <div style={{fontWeight:500,fontSize:13}}>{fcQty.toLocaleString()}개 · {fcPallets}파렛트</div>
-                          {sampleRow?.fbaId&&<div style={{fontSize:11,opacity:0.7,fontFamily:"var(--font-mono)",marginTop:2}}>배송ID: {sampleRow.fbaId}</div>}
-                          {sampleRow?.amazonId&&<div style={{fontSize:11,opacity:0.7,fontFamily:"var(--font-mono)"}}>참조ID: {sampleRow.amazonId}</div>}
-                        </div>
+                    <div key={g.no} style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",overflow:"hidden"}}>
+                      {/* 컨테이너 헤더 */}
+                      <div style={{background:CB[ci],color:CT[ci],padding:"8px 14px",display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+                        <span style={{fontWeight:600,fontSize:13}}>컨{g.no}</span>
+                        {g.container&&<span style={{fontWeight:500,fontFamily:"var(--font-mono)",fontSize:12}}>{g.container}</span>}
+                        {g.shipment_date&&<span style={{fontSize:12}}>{g.shipment_date}</span>}
+                        {g.destination&&<span style={{fontSize:12}}>{g.destination}</span>}
+                        {g.etd&&<span style={{fontSize:11,opacity:0.8}}>ETD {g.etd}</span>}
+                        <span style={{marginLeft:"auto",fontWeight:500,fontSize:12}}>{sumQ.toLocaleString()}개 · {sumP}파렛트</span>
                       </div>
 
-                      {/* 테이블: 카톤 라벨 + 파렛트 라벨 */}
+                      {/* 테이블 */}
                       <div style={{overflowX:"auto"}}>
                         <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                           <thead>
                             <tr>
-                              <th colSpan={6} style={{...TH,borderRight:"2px solid var(--color-border-secondary)",textAlign:"center",fontSize:10,padding:"4px 8px"}}>카톤 라벨</th>
-                              <th colSpan={5} style={{...TH,textAlign:"center",fontSize:10,padding:"4px 8px",background:"rgba(219,234,254,0.3)"}}>파렛트 라벨</th>
-                            </tr>
-                            <tr>
-                              {["약호","ASIN","신박스코드","카톤수량","파렛트당카톤","파렛트"].map(h=>(
+                              {["약호","ASIN","신박스코드","카톤수량","파렛트당카톤","파렛트","FC센터"].map(h=>(
                                 <th key={h} style={TH}>{h}</th>
                               ))}
-                              <th style={{...TH,borderLeft:"2px solid var(--color-border-secondary)",background:"rgba(219,234,254,0.2)"}}>배송 ID</th>
-                              <th style={{...TH,background:"rgba(219,234,254,0.2)"}}>아마존 참조 ID</th>
-                              <th style={{...TH,background:"rgba(219,234,254,0.2)"}}>FC 센터</th>
-                              <th style={{...TH,background:"rgba(219,234,254,0.2)",minWidth:200}}>주소</th>
-                              <th style={{...TH,background:"rgba(219,234,254,0.2)",minWidth:80}}>파렛트 번호<span style={{fontSize:9,fontWeight:400,marginLeft:4,color:"var(--color-text-tertiary)"}}>(직접입력)</span></th>
+                              <th style={{...TH,...IBLU}}>파렛트 번호 <span style={{fontSize:9,fontWeight:400,color:"var(--color-text-tertiary)"}}>(직접입력)</span></th>
                             </tr>
                           </thead>
                           <tbody>
-                            {rows.map((r, ri) => (
-                              <tr key={r.sku} style={{background:ri%2===0?"transparent":"var(--color-background-secondary)"}}>
-                                <td style={{...TD,fontWeight:500,minWidth:130}}>{r.sku}</td>
-                                <td style={{...TD,fontFamily:"var(--font-mono)",fontSize:11,minWidth:100}}>{r.asin}</td>
-                                <td style={{...TD,color:"var(--color-text-info)",fontWeight:500,minWidth:70}}>{r.loc}</td>
-                                <td style={{...TD,textAlign:"right",fontWeight:500}}>{r.qty.toLocaleString()}</td>
-                                <td style={{...TD,textAlign:"center"}}>{r.cpp}</td>
-                                <td style={{...TD,textAlign:"right",fontWeight:500,borderRight:"2px solid var(--color-border-secondary)"}}>{r.pallets}</td>
-                                {/* 파렛트 라벨 — FC 첫 행에만 표시, 나머지는 병합 효과 */}
-                                {ri === 0 ? (<>
-                                  <td rowSpan={rows.length} style={{...TD,fontFamily:"var(--font-mono)",fontSize:11,verticalAlign:"top",paddingTop:8,borderLeft:"2px solid var(--color-border-secondary)",background:"rgba(219,234,254,0.08)"}}>{r.fbaId||<span style={{color:"var(--color-text-tertiary)"}}>미입력</span>}</td>
-                                  <td rowSpan={rows.length} style={{...TD,fontFamily:"var(--font-mono)",fontSize:11,verticalAlign:"top",paddingTop:8,background:"rgba(219,234,254,0.08)"}}>{r.amazonId||<span style={{color:"var(--color-text-tertiary)"}}>미입력</span>}</td>
-                                  <td rowSpan={rows.length} style={{...TD,fontWeight:500,verticalAlign:"top",paddingTop:8,background:"rgba(219,234,254,0.08)"}}>{r.fc||<span style={{color:"var(--color-text-tertiary)"}}>미입력</span>}</td>
-                                  <td rowSpan={rows.length} style={{...TD,fontSize:11,verticalAlign:"top",paddingTop:8,whiteSpace:"pre-line",maxWidth:220,background:"rgba(219,234,254,0.08)"}}>{r.address||<span style={{color:"var(--color-text-tertiary)"}}>미입력</span>}</td>
-                                  <td rowSpan={rows.length} style={{...TD,verticalAlign:"top",paddingTop:8,background:"rgba(219,234,254,0.08)"}}>
-                                    <span style={{fontSize:11,color:"var(--color-text-tertiary)"}}>{pltRanges[r.sku]}</span>
+                            {g.rows.map((r, ri) => {
+                              const m = master[String(r.sku)] || {} as MasterItem
+                              const cpp = parseFloat(String(m.cpp)) || 16
+                              const pallets = Math.ceil(r.quantity / cpp)
+                              const meta = s2meta[String(r.sku)] || {}
+                              const key = `${g.no}_${String(r.sku)}`
+                              return (
+                                <tr key={ri} style={{background:ri%2===0?"transparent":"var(--color-background-secondary)"}}>
+                                  <td style={{...TD,fontWeight:500,minWidth:130}}>{String(r.sku)}</td>
+                                  <td style={{...TD,fontFamily:"var(--font-mono)",fontSize:11,minWidth:100}}>{m.asin||""}</td>
+                                  <td style={{...TD,color:"var(--color-text-info)",fontWeight:500,minWidth:70}}>{String(r.location||m.loc||"")}</td>
+                                  <td style={{...TD,textAlign:"right",fontWeight:500,minWidth:60}}>{r.quantity.toLocaleString()}</td>
+                                  <td style={{...TD,textAlign:"center",minWidth:60}}>{cpp}</td>
+                                  <td style={{...TD,textAlign:"right",fontWeight:500,minWidth:50}}>{pallets}</td>
+                                  <td style={{...TD,minWidth:60,fontWeight:500,color:meta.fc?"var(--color-text-primary)":"var(--color-text-tertiary)"}}>{meta.fc||"—"}</td>
+                                  <td style={{...TD,...IBLU,minWidth:120}}>
+                                    <input
+                                      value={pltNotes[key]||""}
+                                      onChange={e=>setPltNotes(p=>({...p,[key]:e.target.value}))}
+                                      placeholder={`예) ${pallets}번`}
+                                      style={{...INP,fontSize:11}}
+                                    />
                                   </td>
-                                </>) : null}
-                              </tr>
-                            ))}
+                                </tr>
+                              )
+                            })}
                           </tbody>
                           <tfoot>
                             <tr style={{background:CB[ci],borderTop:"1px solid "+CT[ci]+"44"}}>
-                              <td colSpan={3} style={{...TD,color:CT[ci],fontWeight:500,textAlign:"right",fontSize:11}}>{fc} 소계</td>
-                              <td style={{...TD,color:CT[ci],fontWeight:500,textAlign:"right"}}>{fcQty.toLocaleString()}</td>
+                              <td colSpan={3} style={{...TD,color:CT[ci],fontWeight:500,textAlign:"right",fontSize:11}}>컨{g.no} 소계</td>
+                              <td style={{...TD,color:CT[ci],fontWeight:500,textAlign:"right"}}>{sumQ.toLocaleString()}</td>
                               <td style={TD}></td>
-                              <td style={{...TD,color:CT[ci],fontWeight:500,textAlign:"right"}}>{fcPallets}파렛트</td>
-                              <td colSpan={5} style={TD}></td>
+                              <td style={{...TD,color:CT[ci],fontWeight:500,textAlign:"right"}}>{sumP}파렛트</td>
+                              <td colSpan={2} style={TD}></td>
                             </tr>
                           </tfoot>
                         </table>
@@ -913,11 +897,14 @@ export default function ShipmentApp() {
                 })}
 
                 {/* 전체 합계 */}
-                <div style={{padding:"10px 16px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-tertiary)",display:"flex",gap:24,fontSize:12}}>
+                <div style={{padding:"10px 16px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-tertiary)",display:"flex",gap:24,fontSize:12,flexWrap:"wrap"}}>
                   <span style={{fontWeight:500}}>전체 합계</span>
-                  <span>총 {logRows.reduce((s,r)=>s+r.qty,0).toLocaleString()}개</span>
-                  <span>총 {logRows.reduce((s,r)=>s+r.pallets,0)}파렛트</span>
-                  <span style={{color:"var(--color-text-tertiary)"}}>{Object.keys(fcGroups).length}개 FC센터</span>
+                  <span>총 {fd.reduce((s,r)=>s+r.quantity,0).toLocaleString()}개</span>
+                  <span>총 {s2rows.reduce((s,r)=>s+r.pallets,0)}파렛트</span>
+                  <span style={{color:"var(--color-text-tertiary)"}}>{groups.length}개 컨테이너</span>
+                  <span style={{color:"var(--color-text-tertiary)"}}>
+                    FC: {[...new Set(s2rows.map(r=>(s2meta[r.sku]||{}).fc).filter(Boolean))].join(', ')||"미입력"}
+                  </span>
                 </div>
               </div>
             )}
