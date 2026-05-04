@@ -593,7 +593,7 @@ export default function ShipmentApp() {
           <NavBtn m="1" label="① 업로드"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
           <NavBtn m="2" label="② 1차 가공"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
           <NavBtn m="label" label="② 라벨 분류"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
-          <NavBtn m="logistics" label="②.5 물류 전달"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
+          <NavBtn m="logistics" label="2.5 물류 전달"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
           <NavBtn m="3" label="③ 2차 가공"/>
         </div>
         <button onClick={()=>setMode('map')} style={{marginLeft:"auto",fontSize:11,padding:"6px 14px",background:mode==='map'?"var(--color-background-secondary)":"transparent",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",cursor:"pointer",color:mode==='map'?"var(--color-text-primary)":"var(--color-text-secondary)"}}>매핑 관리</button>
@@ -788,7 +788,7 @@ export default function ShipmentApp() {
         const groups = buildS3groups()
 
         function expLogistics() {
-          const hdr = [['컨테이너','약호','ASIN','신박스코드','카톤수량','파렛트당카톤','파렛트','FC센터','파렛트번호']]
+          const hdr = [['컨테이너','약호','신박스코드','카톤수량','파렛트당카톤','파렛트','FC센터','파렛트번호']]
           const body: unknown[][] = []
           for (const g of groups) {
             for (const r of g.rows) {
@@ -799,7 +799,7 @@ export default function ShipmentApp() {
               const key = `${g.no}_${String(r.sku)}`
               body.push([
                 g.container || `컨${g.no}`,
-                String(r.sku), m.asin || '',
+                String(r.sku),
                 String(r.location || m.loc || ''),
                 r.quantity, cpp, pallets,
                 meta.fc || '', pltNotes[key] || ''
@@ -847,7 +847,7 @@ export default function ShipmentApp() {
                         <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                           <thead>
                             <tr>
-                              {["약호","ASIN","신박스코드","카톤수량","파렛트당카톤","파렛트","FC센터"].map(h=>(
+                              {["약호","신박스코드","카톤수량","파렛트당카톤","파렛트","FC센터"].map(h=>(
                                 <th key={h} style={TH}>{h}</th>
                               ))}
                               <th style={{...TH,...IBLU}}>파렛트 번호 <span style={{fontSize:9,fontWeight:400,color:"var(--color-text-tertiary)"}}>(직접입력)</span></th>
@@ -863,7 +863,6 @@ export default function ShipmentApp() {
                               return (
                                 <tr key={ri} style={{background:ri%2===0?"transparent":"var(--color-background-secondary)"}}>
                                   <td style={{...TD,fontWeight:500,minWidth:130}}>{String(r.sku)}</td>
-                                  <td style={{...TD,fontFamily:"var(--font-mono)",fontSize:11,minWidth:100}}>{m.asin||""}</td>
                                   <td style={{...TD,color:"var(--color-text-info)",fontWeight:500,minWidth:70}}>{String(r.location||m.loc||"")}</td>
                                   <td style={{...TD,textAlign:"right",fontWeight:500,minWidth:60}}>{r.quantity.toLocaleString()}</td>
                                   <td style={{...TD,textAlign:"center",minWidth:60}}>{cpp}</td>
@@ -883,7 +882,7 @@ export default function ShipmentApp() {
                           </tbody>
                           <tfoot>
                             <tr style={{background:CB[ci],borderTop:"1px solid "+CT[ci]+"44"}}>
-                              <td colSpan={3} style={{...TD,color:CT[ci],fontWeight:500,textAlign:"right",fontSize:11}}>컨{g.no} 소계</td>
+                              <td colSpan={2} style={{...TD,color:CT[ci],fontWeight:500,textAlign:"right",fontSize:11}}>컨{g.no} 소계</td>
                               <td style={{...TD,color:CT[ci],fontWeight:500,textAlign:"right"}}>{sumQ.toLocaleString()}</td>
                               <td style={TD}></td>
                               <td style={{...TD,color:CT[ci],fontWeight:500,textAlign:"right"}}>{sumP}파렛트</td>
