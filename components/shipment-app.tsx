@@ -270,6 +270,18 @@ export default function ShipmentApp() {
     return new Promise<any>((resolve,reject)=>{const s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';s.onload=()=>{const lib=(window as any).pdfjsLib as any;lib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';resolve(lib)};s.onerror=reject;document.head.appendChild(s)})
   }
 
+  // ── pdfjs 옵션 헬퍼 ─────────────────────────────────────────
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function getPdfjsOpts(data: Uint8Array): any {
+    return {
+      data: data.slice(),
+      cMapUrl: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/cmaps/',
+      cMapPacked: true,
+      useWorkerFetch: false,
+      isEvalSupported: false,
+    }
+  }
+
   // ── 파렛트 라벨만 따로 처리 (카톤 없이도 pltNotes 업데이트) ──
   async function processPalletOnly(pltFiles: File[]) {
     if (!pltFiles.length) return
@@ -427,16 +439,6 @@ export default function ShipmentApp() {
 
       const pdfjsLib = await loadPdfjs()
       const { PDFDocument, rgb } = await import('pdf-lib')
-
-      // pdfjs 옵션: cMap 로드로 일본어 폰트 지원
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const getPdfjsOpts = (data: Uint8Array): any => ({
-        data: data.slice(),
-        cMapUrl: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/cmaps/',
-        cMapPacked: true,
-        useWorkerFetch: false,
-        isEvalSupported: false,
-      })
 
       type PageEntry = {
         fileBytes: Uint8Array
@@ -967,6 +969,41 @@ export default function ShipmentApp() {
             </div>
           )}
 
+          {/* A4 라벨 용지 장수 계산 (카톤 라벨만, 6개/장) */}
+          {Object.keys(labelGroups).filter(k=>!k.startsWith('__PLT__')).length>0&&!labelLoading&&(
+            <div style={{marginBottom:12,padding:"10px 14px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-tertiary)"}}>
+              <div style={{fontSize:11,fontWeight:500,marginBottom:8,color:"var(--color-text-primary)"}}>
+                🖨 A4 라벨 용지 필요량 <span style={{fontSize:10,fontWeight:400,color:"var(--color-text-tertiary)",marginLeft:6}}>라벨 6개/장 기준</span>
+              </div>
+              <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+                {Object.entries(labelCounts).filter(([k])=>!k.startsWith('__PLT__')).sort(([a],[b])=>a.localeCompare(b)).map(([loc,cnt])=>{
+                  const pages = Math.ceil(cnt/6)
+                  const realSku = locToRealSku(loc)
+                  return(
+                    <div key={loc} style={{padding:"6px 12px",background:"var(--color-background-primary)",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-secondary)",fontSize:11,minWidth:160}}>
+                      <div style={{fontWeight:500,color:"var(--color-text-info)",marginBottom:2}}>{loc}</div>
+                      <div style={{fontSize:10,color:"var(--color-text-secondary)",marginBottom:4,fontFamily:"var(--font-mono)"}}>{realSku}</div>
+                      <div style={{display:"flex",justifyContent:"space-between",gap:16}}>
+                        <span style={{color:"var(--color-text-tertiary)"}}>라벨 {cnt}개</span>
+                        <span style={{fontWeight:600}}>→ <span style={{color:"#dc2626",fontSize:13}}>{pages}</span>장</span>
+                      </div>
+                    </div>
+                  )
+                })}
+                {/* 합계 카드 */}
+                <div style={{padding:"6px 12px",background:"rgba(220,38,38,0.08)",borderRadius:"var(--border-radius-md)",border:"1px solid rgba(220,38,38,0.3)",fontSize:11,minWidth:120,display:"flex",flexDirection:"column",justifyContent:"center",alignItems:"center",gap:4}}>
+                  <div style={{fontWeight:600}}>전체</div>
+                  <div style={{fontSize:15,fontWeight:700,color:"#dc2626"}}>
+                    {Math.ceil(Object.entries(labelCounts).filter(([k])=>!k.startsWith('__PLT__')).reduce((s,[,c])=>s+c,0)/6)}장
+                  </div>
+                  <div style={{fontSize:10,color:"var(--color-text-tertiary)"}}>
+                    {Object.entries(labelCounts).filter(([k])=>!k.startsWith('__PLT__')).reduce((s,[,c])=>s+c,0)}개 라벨
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* 디버그 패널 */}
           {labelDebug.length>0&&(
             <div>
@@ -1050,12 +1087,17 @@ export default function ShipmentApp() {
               ])
             }
           }
+          // 합계행
+          const totalQty = groups.reduce((s,g)=>s+g.rows.reduce((s2,r)=>s2+r.quantity,0),0)
+          const totalPlt = groups.reduce((s,g)=>s+g.rows.reduce((s2,r)=>{const cpp=parseFloat(String((master[String(r.sku)]||{}).cpp))||16;return s2+Math.ceil(r.quantity/cpp)},0),0)
+          body.push(['합계','','',totalQty,'',totalPlt,'',''])
           xlsDl([...hdr, ...body], '물류전달', '물류전달_' + new Date().toISOString().slice(0,10) + '.xlsx')
         }
 
         function printLogistics() {
           const groups2 = buildS3groups()
-          const rows: {ctn:string, sku:string, loc:string, qty:number, cpp:number, pallets:number, fc:string, plt:string}[] = []
+          type PRow = {ctn:string, ctnNo:number, sku:string, realSku:string, loc:string, qty:number, cpp:number, pallets:number, fc:string, plt:string}
+          const allRows: PRow[] = []
           for (const g of groups2) {
             for (const r of g.rows) {
               const m = master[String(r.sku)] || {} as MasterItem
@@ -1063,67 +1105,104 @@ export default function ShipmentApp() {
               const pallets = Math.ceil(r.quantity / cpp)
               const meta = s2meta[String(r.sku)] || {}
               const key = `${g.no}_${String(r.sku)}`
-              rows.push({ ctn:`컨${g.no}`, sku:String(r.sku), loc:String(r.location||m.loc||''), qty:r.quantity, cpp, pallets, fc:meta.fc||'', plt:pltNotes[key]||'' })
+              allRows.push({ ctn:`컨${g.no}`, ctnNo:g.no, sku:String(r.sku), realSku:m.sku||String(r.sku), loc:String(r.location||m.loc||''), qty:r.quantity, cpp, pallets, fc:meta.fc||'', plt:pltNotes[key]||'' })
             }
           }
 
-          // 컨테이너별로 그룹핑 후 중복 컨번 제거
-          let lastCtn = ''
-          const tbodyRows = rows.map(r => {
-            const showCtn = r.ctn !== lastCtn
-            lastCtn = r.ctn
-            return `<tr class="${r.fc==='HIY1'?'hiy':'tpb'}">
-              <td class="ctn">${showCtn ? r.ctn : ''}</td>
-              <td>${r.sku}</td>
-              <td class="loc">${r.loc}</td>
-              <td class="num">${r.qty.toLocaleString()}</td>
-              <td class="num">${r.cpp}</td>
-              <td class="num bold">${r.pallets}</td>
-              <td class="fc">${r.fc}</td>
-              <td class="plt">${r.plt}</td>
+          // 컨테이너별 rowspan 계산
+          const ctnRowspan: Record<number, number> = {}
+          for (const r of allRows) { ctnRowspan[r.ctnNo] = (ctnRowspan[r.ctnNo]||0)+1 }
+          const ctnFirstSeen = new Set<number>()
+
+          const totalQty = allRows.reduce((s,r)=>s+r.qty,0)
+          const totalPlt = allRows.reduce((s,r)=>s+r.pallets,0)
+
+          const FC_COLORS: Record<string,{bg:string,text:string,pltBg:string}> = {
+            HIY1: {bg:'#dbeafe',text:'#1e3a8a',pltBg:'#1e3a8a'},
+            TPB5: {bg:'#d1fae5',text:'#064e3b',pltBg:'#064e3b'},
+            VJNB: {bg:'#fef3c7',text:'#78350f',pltBg:'#78350f'},
+          }
+
+          const tbodyRows = allRows.map(r => {
+            const fc = r.fc.toUpperCase()
+            const colors = FC_COLORS[fc] || {bg:'#f3f4f6',text:'#111',pltBg:'#374151'}
+            const isFirst = !ctnFirstSeen.has(r.ctnNo)
+            if (isFirst) ctnFirstSeen.add(r.ctnNo)
+            const ctnCell = isFirst
+              ? `<td rowspan="${ctnRowspan[r.ctnNo]}" class="ctn-cell">${r.ctn}</td>`
+              : ''
+            return `<tr style="background:${colors.bg}">
+              ${ctnCell}
+              <td class="sku-cell">${r.sku}</td>
+              <td class="sku-cell" style="color:#555;font-size:10px">${r.realSku}</td>
+              <td class="loc-cell">${r.loc}</td>
+              <td class="num-cell">${r.qty.toLocaleString()}</td>
+              <td class="num-cell bold-cell">${r.pallets}</td>
+              <td class="fc-cell" style="background:${colors.pltBg};color:#fff">${r.fc}</td>
+              <td class="plt-cell" style="color:${colors.pltBg};font-weight:700">${r.plt||'—'}</td>
             </tr>`
           }).join('')
 
           const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
-  body{font-family:Arial,sans-serif;font-size:11px;margin:20px}
-  h2{font-size:14px;margin-bottom:8px}
-  table{border-collapse:collapse;width:100%}
-  th,td{border:1px solid #999;padding:4px 6px;white-space:nowrap}
-  th{background:#333;color:#fff;text-align:center;font-size:10px}
-  .subhead th{background:#666}
-  td.num{text-align:right}
-  td.ctn{font-weight:bold;background:#f5f5f5;text-align:center}
-  td.loc{color:#1a56db;font-weight:bold}
-  td.fc{font-weight:bold;text-align:center}
-  td.plt{color:#1a56db;text-align:center}
-  td.bold{font-weight:bold}
-  tr.hiy td{background:rgba(219,234,254,0.25)}
-  tr.tpb td{background:rgba(209,250,229,0.25)}
-  tr.hiy td.ctn, tr.tpb td.ctn{background:#f5f5f5}
-  @media print{body{margin:10px}h2{font-size:12px}}
+  @page{size:A4 landscape;margin:10mm}
+  *{box-sizing:border-box}
+  body{font-family:'Arial',sans-serif;font-size:11px;margin:0;padding:8px}
+  h2{font-size:16px;font-weight:700;margin:0 0 10px;color:#111;border-bottom:3px solid #111;padding-bottom:4px}
+  .sub{font-size:11px;color:#555;margin-bottom:10px}
+  table{border-collapse:collapse;width:100%;table-layout:fixed}
+  th,td{border:1.5px solid #555;padding:5px 7px;vertical-align:middle}
+  .group-header th{padding:6px 8px;font-size:12px;font-weight:700;text-align:center;letter-spacing:1px}
+  .carton-header{background:#1e293b;color:#fff}
+  .pallet-header{background:#1e40af;color:#fff}
+  .col-header th{background:#374151;color:#fff;font-size:10px;text-align:center;padding:5px 6px}
+  .ctn-cell{background:#1e293b;color:#fff;font-weight:700;font-size:14px;text-align:center;vertical-align:middle;border:2px solid #0f172a}
+  .sku-cell{font-weight:600;white-space:nowrap}
+  .loc-cell{font-weight:700;color:#1e40af;text-align:center}
+  .num-cell{text-align:right;font-size:12px}
+  .bold-cell{font-weight:700;font-size:13px}
+  .fc-cell{text-align:center;font-weight:700;font-size:12px;border:2px solid #1e3a8a}
+  .plt-cell{text-align:center;font-size:13px;font-weight:700;min-width:80px}
+  .total-row td{background:#1e293b;color:#fff;font-weight:700;font-size:12px;text-align:right;border:2px solid #0f172a}
+  .total-row td:first-child{text-align:center}
+  col.c-ctn{width:60px}col.c-sku{width:120px}col.c-rsku{width:130px}col.c-loc{width:70px}col.c-qty{width:70px}col.c-plt{width:55px}col.c-fc{width:55px}col.c-pltno{width:80px}
+  @media print{body{padding:0}h2{font-size:14px}}
 </style>
 </head><body>
-<h2>물류 전달 — ${activeSheet||''}</h2>
+<h2>물류 전달 &nbsp; ${activeSheet||''}</h2>
+<div class="sub">출력일: ${new Date().toLocaleDateString('ko-KR')} &nbsp;|&nbsp; 총 ${totalQty.toLocaleString()}개 &nbsp;|&nbsp; 총 ${totalPlt}파렛트</div>
 <table>
+  <colgroup>
+    <col class="c-ctn"><col class="c-sku"><col class="c-rsku"><col class="c-loc">
+    <col class="c-qty"><col class="c-plt"><col class="c-fc"><col class="c-pltno">
+  </colgroup>
   <thead>
-    <tr>
-      <th colspan="6" style="background:#444">카톤 라벨</th>
-      <th colspan="2" style="background:#1a56db">파렛트 라벨</th>
+    <tr class="group-header">
+      <th rowspan="2" class="carton-header" style="font-size:14px">컨테이너</th>
+      <th colspan="3" class="carton-header">카톤 라벨</th>
+      <th colspan="2" class="carton-header">수량</th>
+      <th colspan="2" class="pallet-header">파렛트 라벨</th>
     </tr>
-    <tr class="subhead">
-      <th>컨테이너</th><th>약호</th><th>신박스코드</th>
-      <th>카톤수량</th><th>파렛트당카톤</th><th>파렛트</th>
+    <tr class="col-header">
+      <th>약호</th><th>Merchant SKU</th><th>신박스코드</th>
+      <th>카톤</th><th>파렛트</th>
       <th>FC센터</th><th>파렛트번호</th>
     </tr>
   </thead>
-  <tbody>${tbodyRows}</tbody>
+  <tbody>${tbodyRows}
+    <tr class="total-row">
+      <td colspan="4">합 계</td>
+      <td>${totalQty.toLocaleString()}</td>
+      <td>${totalPlt}</td>
+      <td colspan="2"></td>
+    </tr>
+  </tbody>
 </table>
 </body></html>`
 
           const w = window.open('', '_blank')
-          if (w) { w.document.write(html); w.document.close(); setTimeout(()=>w.print(), 300) }
+          if (w) { w.document.write(html); w.document.close(); setTimeout(()=>w.print(), 400) }
         }
 
         return (
