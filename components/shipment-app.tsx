@@ -74,7 +74,6 @@ interface LabelDebugEntry {
   skusNorm: string[]         // 정규화된 SKU (매칭 비교용)
   matchedLoc: string | null  // 매칭된 LOC
   labelCount: number
-  note?: string
 }
 
 const calcGW  = (qty:number, nw:number) => Math.trunc(qty*nw*1.01*10)/10
@@ -214,10 +213,6 @@ export default function ShipmentApp() {
     return null
   }
 
-  function cleanSkuCandidate(s: string): string {
-    return s.replace(/\\n/g, '').replace(/\n/g, '').replace(/\s+/g, '').trim()
-  }
-
   // ── 라벨 PDF 분류 ─────────────────────────────────────────
   // 로직:
   // 1. 각 페이지에서 pdfjs로 텍스트 추출 → 「単一のSKU」 다음 토큰이 라벨의 SKU
@@ -241,13 +236,6 @@ export default function ShipmentApp() {
 
       const pdfjsLib = await loadPdfjs()
       const { PDFDocument, rgb } = await import('pdf-lib')
-      const getDocOpts = (bytes: Uint8Array) => ({
-        data: bytes.slice(),
-        useSystemFonts: true,
-        cMapUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/',
-        cMapPacked: true,
-        standardFontDataUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/standard_fonts/',
-      })
 
       type PageEntry = {
         fileBytes: Uint8Array      // 원본 PDF 바이트 (Uint8Array, 매번 slice로 복사)
@@ -262,111 +250,99 @@ export default function ShipmentApp() {
       let processed = 0
 
       // 전체 페이지 수
-      const injectSyntheticLabels = (target: { sku: string; y: number; x: number }[], skus: string[]) => {
-        skus.forEach((sku, idx) => target.push({ sku, y: 10000 - idx * 40, x: idx % 2 === 0 ? 0 : 1000 }))
-      }
-
       for (const f of files) {
         const bytes = new Uint8Array(await f.arrayBuffer())
-        const pdf = await pdfjsLib.getDocument(getDocOpts(bytes)).promise
+        const pdf = await pdfjsLib.getDocument({ data: bytes.slice() }).promise
         totalPages += pdf.numPages
         pdf.destroy()
       }
 
       for (const f of files) {
         const fileBytes = new Uint8Array(await f.arrayBuffer())
-        const pdf = await pdfjsLib.getDocument(getDocOpts(fileBytes)).promise
+        const pdf = await pdfjsLib.getDocument({ data: fileBytes.slice() }).promise
 
         for (let i = 0; i < pdf.numPages; i++) {
           const page = await pdf.getPage(i + 1)
           const content = await page.getTextContent()
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const items = content.items as any[]
-          const tokenTexts = items.map((it)=>String(it.str || ""))
-          const fullTextSpaced = tokenTexts.join(" ")
-          const fullTextNoSpace = tokenTexts.join("").replace(/\s+/g, "")
 
           // 각 라벨의 SKU 추출
-          // 1) 토큰 기반 추출
-          // 2) 실패 시 전체 텍스트 정규식 fallback
-          // 라벨 위치: transform[5](Y), transform[4](X)로 정렬
+          // 구조: 「単一のSKU」 → 다음 줄에 SKU (하이픈으로 끝나면 그 다음 줄과 합침)
+          // 예: 'US-HSBWB6-090-040-180-5S-' + '1Pack' → 'US-HSBWB6-090-040-180-5S-1Pack'
           type LabelInfo = { sku: string; y: number; x: number }
           const labelInfos: LabelInfo[] = []
 
           for (let j = 0; j < items.length; j++) {
             const str = items[j].str as string
-            if (str && (str.includes('単一のSKU') || str === '単一のSKU')) {
-              const y = items[j].transform?.[5] ?? 0
-              const x = items[j].transform?.[4] ?? 0
-              let sku = ''
-              // 바로 뒤 최대 8토큰에서 SKU 패턴 찾기
-              for (let k = j + 1; k < Math.min(j + 9, items.length); k++) {
-                const s = (items[k].str as string)?.trim()
-                if (s && s.length > 4
-                    && !s.includes('数量') && !s.includes('JAN')
-                    && !s.match(/^[\d\s]+$/) && !s.includes('のSKU')
-                    && !s.includes('FBA') && !s.includes('Pack数')
-                ) {
-                  // SKU가 토큰 분리되는 경우(HK124...-5W- / 1Pack)를 합쳐서 시도
-                  const s2 = ((items[k + 1]?.str as string) || '').trim()
-                  const s3 = ((items[k + 2]?.str as string) || '').trim()
-                  const merged = cleanSkuCandidate([s, s2, s3].join(''))
-                  sku = merged.length >= s.length ? merged : cleanSkuCandidate(s)
+            if (!str) continue
+
+            // 「単一のSKU」 마커 감지 (토큰이 쪼개질 경우도 대응)
+            const isSingleSku = str === '単一のSKU' || str.includes('単一のSKU') ||
+              (str === '単一の' && items[j+1]?.str === 'SKU') ||
+              (str === '単' && items[j+1]?.str === '一のSKU')
+
+            if (!isSingleSku) continue
+
+            const y = items[j].transform?.[5] ?? 0
+            const x = items[j].transform?.[4] ?? 0
+            let sku = ''
+
+            // 「単一のSKU」 다음 최대 10토큰에서 SKU 조합
+            for (let k = j + 1; k < Math.min(j + 11, items.length); k++) {
+              const s = (items[k].str as string)?.trim() ?? ''
+              if (!s) continue
+
+              // 건너뛸 토큰
+              if (s.includes('数量') || s.includes('JAN') || s.includes('のSKU') ||
+                  s.includes('Pack数') || /^[\d\s]+$/.test(s)) continue
+
+              // FBA ID (FBA15... 형태)는 건너뜀
+              if (/^FBA\d/.test(s)) continue
+
+              if (s.length > 2) {
+                // 첫 SKU 토큰 발견
+                sku = s
+
+                // 다음 토큰이 '1Pack' 계열이면 합침 (라인 줄바꿈으로 쪼개진 경우)
+                for (let m = k + 1; m < Math.min(k + 4, items.length); m++) {
+                  const next = (items[m].str as string)?.trim() ?? ''
+                  if (!next) continue
+                  // sku가 하이픈으로 끝나거나, 다음 토큰이 Pack/JAPAN/JP 계열이면 합침
+                  if (sku.endsWith('-') || /^1?Pack|JAPAN$|^JP$|-JP$/i.test(next)) {
+                    if (!next.includes('数量') && !next.includes('JAN') && !/^[\d\s]+$/.test(next)) {
+                      sku += next
+                      k = m
+                    }
+                  }
                   break
                 }
+                break
               }
-              if (sku) labelInfos.push({ sku, y, x })
             }
-          }
 
-          // fallback: 텍스트 전체에서 「単一のSKU <SKU> 数量」 패턴 추출
-          if (labelInfos.length === 0) {
-            const re = /単一のSKU\s*([A-Za-z0-9.\-_/]+?)\s*(?:数量|JAN|FBA|$)/g
-            const fallbackSkus: string[] = []
-            let m: RegExpExecArray | null
-            while ((m = re.exec(fullTextSpaced)) !== null) {
-              const s = (m[1] || "").trim()
-              const cleaned = cleanSkuCandidate(s)
-              if (cleaned.length > 4) fallbackSkus.push(cleaned)
-            }
-            injectSyntheticLabels(labelInfos, fallbackSkus)
-          }
+            if (sku) labelInfos.push({ sku, y, x })
+          } // end for j
 
-          // fallback2: marker가 전혀 없어도 페이지 텍스트에서 마스터 realSku를 직접 탐색
+          // fallback: 単一のSKU 마커가 전혀 안 읽히는 경우
+          // → 전체 텍스트에서 마스터 realSku를 직접 탐색
           if (labelInfos.length === 0) {
-            const matchedMasterSkus: string[] = []
+            const fullNoSp = items.map((it: {str:string}) => (it.str||'')).join('').replace(/\s+/g,'').toUpperCase()
+            const matchedSkus: string[] = []
             for (const m of Object.values(master)) {
-              if (!m.sku) continue
+              if (!m.sku || !m.loc) continue
               const norm = normalizeSku(m.sku)
               if (norm.length < 6) continue
-              if (fullTextNoSpace.toUpperCase().includes(norm)) matchedMasterSkus.push(m.sku)
+              if (fullNoSp.includes(norm)) matchedSkus.push(m.sku)
             }
-            injectSyntheticLabels(labelInfos, [...new Set(matchedMasterSkus)])
-          }
-
-          // fallback3: marker/마스터 직접탐색 모두 실패하면 일반 SKU 패턴 후보를 추출
-          if (labelInfos.length === 0) {
-            const genericCandidates = (fullTextSpaced.match(/[A-Z0-9]+(?:[-.][A-Z0-9]+){2,}(?:-?1PACK(?:-?JP)?|JAPAN|JP)?/gi) || [])
-              .map(s => s.trim())
-              .filter(s => {
-                const u = s.toUpperCase()
-                if (u.startsWith("FBA15")) return false // FBA 라벨 ID 제외
-                if (u.startsWith("B0")) return false    // ASIN 제외
-                return /[A-Z]/.test(u) && /[-.]/.test(u)
-              })
-            injectSyntheticLabels(labelInfos, [...new Set(genericCandidates)])
+            // 각 SKU를 가상의 라벨로 추가 (위치 정보 없음 → 전체 페이지로 간주)
+            const unique = [...new Set(matchedSkus)]
+            unique.forEach((sku, idx) => labelInfos.push({ sku, y: 10000 - idx * 40, x: idx % 2 === 0 ? 0 : 1000 }))
           }
 
           if (labelInfos.length === 0) {
-            debugLog.push({
-              file: f.name,
-              page: i + 1,
-              skusOnPage: [],
-              skusNorm: [],
-              matchedLoc: null,
-              labelCount: 0,
-              note: `SKU marker/candidate not found (textLen=${fullTextNoSpace.length})`,
-            })
+            const rawText = items.map((it: {str:string}) => (it.str||'')).join('').slice(0, 60)
+            debugLog.push({ file: f.name, page: i + 1, skusOnPage: [], skusNorm: [], matchedLoc: null, labelCount: 0, note: `SKU not found. rawText: ${rawText}` })
             processed++
             continue
           }
@@ -412,7 +388,6 @@ export default function ShipmentApp() {
             skusNorm: uniqueSkus.map(s => normalizeSku(s)),
             matchedLoc: matchedLocs.join(', ') || null,
             labelCount: totalLabels,
-            note: matchedLocs.length ? undefined : "SKU extracted but no master mapping match",
           })
 
           processed++
@@ -646,6 +621,7 @@ export default function ShipmentApp() {
                           <td style={{...TD,fontSize:10,textAlign:"center",padding:"3px 8px"}}>{d.labelCount}</td>
                           <td style={{...TD,fontSize:10,padding:"3px 8px",color:d.matchedLoc?"var(--color-text-info)":"var(--color-text-danger)",fontWeight:d.matchedLoc?500:400}}>
                             {d.matchedLoc||"❌ 미매칭"}
+                            {d.note&&<div style={{fontSize:9,color:"var(--color-text-tertiary)",marginTop:2}}>{d.note}</div>}
                           </td>
                         </tr>))}
                       </tbody>
