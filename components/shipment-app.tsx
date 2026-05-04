@@ -133,6 +133,33 @@ export default function ShipmentApp() {
   const [showDebug,setShowDebug]=useState(false)
   const fileRef=useRef<HTMLInputElement>(null)
   const labelRef=useRef<HTMLInputElement>(null)
+  const metaJsonRef=useRef<HTMLInputElement>(null)
+
+  // ── 변동값 JSON 내보내기 (s2meta + ctnMeta) ──────────────
+  function exportMetaJson() {
+    const data = { s2meta, ctnMeta, _v: 1, _date: new Date().toISOString() }
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = 'shipment_meta_' + new Date().toISOString().slice(0, 10) + '.json'
+    a.click()
+  }
+
+  // ── 변동값 JSON 불러오기 ──────────────────────────────────
+  function importMetaJson(file: File) {
+    const rd = new FileReader()
+    rd.onload = ev => {
+      try {
+        const d = JSON.parse(ev.target?.result as string)
+        if (d.s2meta) setS2meta(d.s2meta)
+        if (d.ctnMeta) setCtnMeta(d.ctnMeta)
+        // 매핑 관리의 전체 백업 파일도 지원
+        if (d.master) setMaster(d.master)
+        alert(`복원 완료!\nFBA ID 등 ${Object.keys(d.s2meta||{}).length}개 SKU 메타, 컨테이너 ${Object.keys(d.ctnMeta||{}).length}개`)
+      } catch { alert('JSON 파일이 올바르지 않습니다') }
+    }
+    rd.readAsText(file)
+  }
 
   const raw=(activeSheet&&sheets[activeSheet])||[]
   const {data:nd}=raw.length?normHeaders(raw):{data:[] as RowData[]}
@@ -558,6 +585,12 @@ export default function ShipmentApp() {
               <span>+</span><span style={{color:file?"var(--color-text-primary)":"var(--color-text-tertiary)"}}>{file?file.name:"파일 업로드 (xlsx · csv)"}</span>
             </div>
             <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}} onChange={e=>e.target.files?.[0]&&loadFile(e.target.files[0])}/>
+            {/* 변동값 JSON 백업/복원 */}
+            <button onClick={exportMetaJson} style={{fontSize:11,padding:"3px 10px",cursor:"pointer",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",background:"transparent",color:"var(--color-text-secondary)"}}>⬇ 메타 JSON 백업</button>
+            <label style={{fontSize:11,padding:"3px 10px",cursor:"pointer",border:"0.5px solid var(--color-border-info)",borderRadius:"var(--border-radius-md)",background:"rgba(219,234,254,0.25)",color:"var(--color-text-info)"}}>
+              ⬆ 메타 JSON 복원
+              <input ref={metaJsonRef} type="file" accept=".json" style={{display:"none"}} onChange={e=>{const f=e.target.files?.[0];if(f){importMetaJson(f);e.target.value=""}}}/>
+            </label>
             {file&&<><span style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-tertiary)",color:"var(--color-text-secondary)"}}>{raw.length}행 · {ctnNums.length}컨 · {fd.reduce((s,r)=>s+r.quantity,0).toLocaleString()}개</span><button onClick={expS1} style={{fontSize:11,padding:"3px 10px"}}>xlsx 저장</button><button onClick={()=>setMode('2')} style={{marginLeft:"auto",fontSize:12,padding:"5px 14px",background:"var(--color-background-info)",border:"0.5px solid var(--color-border-info)",color:"var(--color-text-info)",borderRadius:"var(--border-radius-md)",cursor:"pointer",fontWeight:500}}>1차 가공으로 →</button></>}
           </div>
           <SheetTabs/>
@@ -623,13 +656,47 @@ export default function ShipmentApp() {
           </div>
           <input ref={labelRef} type="file" accept="application/pdf" multiple style={{display:"none"}} onChange={e=>{const fs=Array.from(e.target.files||[]);if(fs.length){setLabelFiles(fs);processLabels(fs)}}}/>
 
-          {/* 결과 테이블 */}
+          {/* 결과 테이블 + 수량 비교 */}
           {Object.keys(labelGroups).length>0&&!labelLoading&&(
             <div style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",overflow:"hidden",marginBottom:12}}>
               <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-                <thead><tr><th style={TH}>BOX CODE</th><th style={{...TH,textAlign:"right"}}>라벨 수</th><th style={{...TH,textAlign:"right"}}>파일 크기</th><th style={TH}></th></tr></thead>
-                <tbody>{Object.entries(labelGroups).sort(([a],[b])=>a.localeCompare(b)).map(([loc,bytes],i)=>(<tr key={loc} style={{background:i%2===0?"transparent":"var(--color-background-secondary)"}}><td style={{...TD,fontWeight:500}}>{loc}</td><td style={{...TD,textAlign:"right"}}>{(labelCounts[loc]||0).toLocaleString()}장</td><td style={{...TD,textAlign:"right",color:"var(--color-text-secondary)"}}>{(bytes.length/1024).toFixed(0)}KB</td><td style={TD}><button onClick={()=>dlLabel(loc,bytes)} style={{fontSize:11,padding:"2px 10px",cursor:"pointer",borderRadius:4,border:"0.5px solid var(--color-border-secondary)",background:"transparent"}}>↓ PDF</button></td></tr>))}</tbody>
-                <tfoot><tr style={{background:"var(--color-background-secondary)",borderTop:"1.5px solid var(--color-border-secondary)"}}><td style={{...TD,fontWeight:500}}>합계</td><td style={{...TD,textAlign:"right",fontWeight:500}}>{Object.values(labelCounts).reduce((s,c)=>s+c,0).toLocaleString()}장</td><td style={{...TD,textAlign:"right",fontWeight:500}}>{(Object.values(labelGroups).reduce((s,b)=>s+b.length,0)/1024).toFixed(0)}KB</td><td style={TD}></td></tr></tfoot>
+                <thead><tr>
+                  <th style={TH}>BOX CODE</th>
+                  <th style={{...TH,textAlign:"right"}}>라벨 수</th>
+                  <th style={{...TH,textAlign:"right"}}>1차 가공 수량</th>
+                  <th style={{...TH,textAlign:"right"}}>차이</th>
+                  <th style={{...TH,textAlign:"right"}}>파일 크기</th>
+                  <th style={TH}></th>
+                </tr></thead>
+                <tbody>{Object.entries(labelGroups).sort(([a],[b])=>a.localeCompare(b)).map(([loc,bytes],i)=>{
+                  // 1차 가공에서 해당 BOX CODE(loc)에 해당하는 총 수량 찾기
+                  const s2qty = s2rows.filter(r=>r.loc===loc).reduce((s,r)=>s+r.total,0)
+                  const labelQty = labelCounts[loc]||0
+                  const diff = labelQty - s2qty
+                  const hasData = s2qty > 0
+                  const isOk = diff === 0
+                  return(
+                  <tr key={loc} style={{background:i%2===0?"transparent":"var(--color-background-secondary)"}}>
+                    <td style={{...TD,fontWeight:500}}>{loc}</td>
+                    <td style={{...TD,textAlign:"right",fontWeight:500}}>{labelQty.toLocaleString()}장</td>
+                    <td style={{...TD,textAlign:"right",color:"var(--color-text-secondary)"}}>{hasData?s2qty.toLocaleString()+"개":"—"}</td>
+                    <td style={{...TD,textAlign:"right",fontWeight:500,color:!hasData?"var(--color-text-tertiary)":isOk?"var(--color-text-success)":Math.abs(diff)<=3?"#f59e0b":"var(--color-text-danger)"}}>
+                      {!hasData?"—":isOk?"✅ 일치":diff>0?`+${diff} 초과`:`${diff} 부족`}
+                    </td>
+                    <td style={{...TD,textAlign:"right",color:"var(--color-text-secondary)"}}>{(bytes.length/1024).toFixed(0)}KB</td>
+                    <td style={TD}><button onClick={()=>dlLabel(loc,bytes)} style={{fontSize:11,padding:"2px 10px",cursor:"pointer",borderRadius:4,border:"0.5px solid var(--color-border-secondary)",background:"transparent"}}>↓ PDF</button></td>
+                  </tr>
+                )})}</tbody>
+                <tfoot><tr style={{background:"var(--color-background-secondary)",borderTop:"1.5px solid var(--color-border-secondary)"}}>
+                  <td style={{...TD,fontWeight:500}}>합계</td>
+                  <td style={{...TD,textAlign:"right",fontWeight:500}}>{Object.values(labelCounts).reduce((s,c)=>s+c,0).toLocaleString()}장</td>
+                  <td style={{...TD,textAlign:"right",fontWeight:500}}>{s2rows.reduce((s,r)=>s+r.total,0).toLocaleString()}개</td>
+                  <td style={{...TD,textAlign:"right",fontWeight:500,color:(()=>{const tl=Object.values(labelCounts).reduce((s,c)=>s+c,0);const ts=s2rows.reduce((s,r)=>s+r.total,0);return tl===ts?"var(--color-text-success)":"var(--color-text-danger)"})()}}>
+                    {(()=>{const tl=Object.values(labelCounts).reduce((s,c)=>s+c,0);const ts=s2rows.reduce((s,r)=>s+r.total,0);const d=tl-ts;return tl===ts?"✅ 일치":d>0?`+${d} 초과`:`${d} 부족`})()}
+                  </td>
+                  <td style={{...TD,textAlign:"right",fontWeight:500}}>{(Object.values(labelGroups).reduce((s,b)=>s+b.length,0)/1024).toFixed(0)}KB</td>
+                  <td style={TD}></td>
+                </tr></tfoot>
               </table>
             </div>
           )}
