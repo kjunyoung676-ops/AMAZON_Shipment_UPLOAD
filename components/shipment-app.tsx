@@ -56,13 +56,18 @@ const INP: React.CSSProperties = {border:"none",background:"transparent",fontSiz
 const IBLU: React.CSSProperties = {background:"rgba(219,234,254,0.35)"}
 const EMPTY_SKU = {sku:"",realSku:"",asin:"",to:"",loc:"",cpp:16,fba:0,price:0,kg:0,bx:0,by:0,bz:0}
 
-const LS_KEY = "shipment_app_v1"
+const LS_KEY = "shipment_app_v2"
+// 시트별 저장: key = LS_KEY + "_" + sheetName + "_" + dataKey
 function lsLoad<T>(key: string, fallback: T): T {
-  try { const r = localStorage.getItem(LS_KEY+"_"+key); if (r) return JSON.parse(r) as T } catch { /**/ }
+  try { const r = localStorage.getItem(key); if (r) return JSON.parse(r) as T } catch { /**/ }
   return fallback
 }
 function lsSave(key: string, value: unknown) {
-  try { localStorage.setItem(LS_KEY+"_"+key, JSON.stringify(value)) } catch { /**/ }
+  try { localStorage.setItem(key, JSON.stringify(value)) } catch { /**/ }
+}
+// 시트별 키 생성
+function sheetKey(sheetName: string, dataKey: string) {
+  return `${LS_KEY}_${sheetName}_${dataKey}`
 }
 
 interface MasterItem { sku:string; asin:string; to:string; loc:string; cpp:number; fba:number; price:number; kg:number; bx:number; by:number; bz:number }
@@ -115,19 +120,30 @@ export default function ShipmentApp() {
   const [activeSheet,setAs]=useState<string|null>(null)
   const [file,setFile]=useState<File|null>(null)
   const [mode,setMode]=useState('1')
-  const [master,setMaster]=useState<Record<string,MasterItem>>(()=>lsLoad("master",Object.fromEntries(Object.entries(MASTER_INIT).map(([k,v])=>[k,{...v}]))))
-  const [s2meta,setS2meta]=useState<Record<string,Record<string,string>>>(()=>lsLoad("s2meta",{}))
-  const [ctnMeta,setCtnMeta]=useState<Record<number,Record<string,string>>>(()=>lsLoad("ctnMeta",{}))
-  useEffect(()=>{lsSave("master",master)},[master])
-  useEffect(()=>{lsSave("s2meta",s2meta)},[s2meta])
-  useEffect(()=>{lsSave("ctnMeta",ctnMeta)},[ctnMeta])
+  const [master,setMaster]=useState<Record<string,MasterItem>>(()=>lsLoad(LS_KEY+"_master",Object.fromEntries(Object.entries(MASTER_INIT).map(([k,v])=>[k,{...v}]))))
+  // s2meta/ctnMeta/pltNotes: 시트별로 저장 — activeSheet 변경 시 로드
+  const [s2meta,setS2meta]=useState<Record<string,Record<string,string>>>({})
+  const [ctnMeta,setCtnMeta]=useState<Record<number,Record<string,string>>>({})
+  const [pltNotes,setPltNotes]=useState<Record<string,string>>({})
+
+  useEffect(()=>{lsSave(LS_KEY+"_master",master)},[master])
+
+  // 시트 변경 시 해당 시트의 저장 데이터 로드
+  useEffect(()=>{
+    if(!activeSheet)return
+    setS2meta(lsLoad(sheetKey(activeSheet,"s2meta"),{}))
+    setCtnMeta(lsLoad(sheetKey(activeSheet,"ctnMeta"),{}))
+    setPltNotes(lsLoad(sheetKey(activeSheet,"pltNotes"),{}))
+  },[activeSheet])
+
+  useEffect(()=>{if(activeSheet)lsSave(sheetKey(activeSheet,"s2meta"),s2meta)},[s2meta,activeSheet])
+  useEffect(()=>{if(activeSheet)lsSave(sheetKey(activeSheet,"ctnMeta"),ctnMeta)},[ctnMeta,activeSheet])
+  useEffect(()=>{if(activeSheet)lsSave(sheetKey(activeSheet,"pltNotes"),pltNotes)},[pltNotes,activeSheet])
   const [coll,setColl]=useState<Record<string,boolean>>({})
   const [newSku,setNewSku]=useState({...EMPTY_SKU})
-  // 파렛트 번호 수기 입력 state: key = "ctnNo_sku"
-  const [pltNotes,setPltNotes]=useState<Record<string,string>>(()=>lsLoad("pltNotes",{}))
-  useEffect(()=>{lsSave("pltNotes",pltNotes)},[pltNotes])
   const [fbaLoading,setFbaLoading]=useState(false)
   const [labelFiles,setLabelFiles]=useState<File[]>([])
+  const [pltLabelFiles,setPltLabelFiles]=useState<File[]>([])
   const [labelGroups,setLabelGroups]=useState<Record<string,Uint8Array>>({})
   const [labelCounts,setLabelCounts]=useState<Record<string,number>>({})
   const [labelLoading,setLabelLoading]=useState(false)
@@ -136,15 +152,17 @@ export default function ShipmentApp() {
   const [showDebug,setShowDebug]=useState(false)
   const fileRef=useRef<HTMLInputElement>(null)
   const labelRef=useRef<HTMLInputElement>(null)
+  const pltLabelRef=useRef<HTMLInputElement>(null)
   const metaJsonRef=useRef<HTMLInputElement>(null)
 
-  // ── 변동값 JSON 내보내기 (s2meta + ctnMeta) ──────────────
+  // ── 변동값 JSON 내보내기 (시트별) ──────────────────────────
   function exportMetaJson() {
-    const data = { s2meta, ctnMeta, _v: 1, _date: new Date().toISOString() }
+    const sheetName = activeSheet || 'default'
+    const data = { sheetName, s2meta, ctnMeta, pltNotes, _v: 2, _date: new Date().toISOString() }
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
-    a.download = 'shipment_meta_' + new Date().toISOString().slice(0, 10) + '.json'
+    a.download = `meta_${sheetName}_${new Date().toISOString().slice(0,10)}.json`
     a.click()
   }
 
@@ -156,9 +174,9 @@ export default function ShipmentApp() {
         const d = JSON.parse(ev.target?.result as string)
         if (d.s2meta) setS2meta(d.s2meta)
         if (d.ctnMeta) setCtnMeta(d.ctnMeta)
-        // 매핑 관리의 전체 백업 파일도 지원
+        if (d.pltNotes) setPltNotes(d.pltNotes)
         if (d.master) setMaster(d.master)
-        alert(`복원 완료!\nFBA ID 등 ${Object.keys(d.s2meta||{}).length}개 SKU 메타, 컨테이너 ${Object.keys(d.ctnMeta||{}).length}개`)
+        alert(`복원 완료! [${d.sheetName||'?'}] SKU메타 ${Object.keys(d.s2meta||{}).length}개, 컨테이너 ${Object.keys(d.ctnMeta||{}).length}개`)
       } catch { alert('JSON 파일이 올바르지 않습니다') }
     }
     rd.readAsText(file)
@@ -250,7 +268,7 @@ export default function ShipmentApp() {
   // 3. SKU별로 LOC 결정 → 해당 SKU에 속하는 라벨 인덱스만 남기고
   //    나머지 라벨 위치에 흰색 사각형으로 마스킹
   // 4. 라벨 그리드: 2열 레이아웃, 위→아래·왼→오른 순서
-  async function processLabels(files: File[]) {
+  async function processLabels(files: File[], pltFiles: File[] = []) {
     setLabelLoading(true)
     setLabelGroups({})
     setLabelCounts({})
@@ -498,28 +516,78 @@ export default function ShipmentApp() {
       const result: Record<string, Uint8Array> = {}
       const counts: Record<string, number> = {}
 
+      // ── 표지 페이지 생성 헬퍼 ─────────────────────────────────
+      // A4 사이즈 (595 x 842 pt), 박스코드/realSku 큰 글씨
+      async function makeCoverPage(doc: typeof PDFDocument.prototype, loc: string, isPallet = false) {
+        const { StandardFonts, rgb: pdfRgb } = await import('pdf-lib')
+        const coverPage = doc.addPage([595, 842])
+        let font: Awaited<ReturnType<typeof doc.embedFont>>
+        try { font = await doc.embedFont(StandardFonts.HelveticaBold) }
+        catch { font = await doc.embedFont(StandardFonts.Helvetica) }
+        const realSku = locToRealSku(loc)
+        const sku = locToSku(loc)
+        const label1 = loc
+        const label2 = realSku || sku || ''
+
+        // 배경 연한 회색
+        coverPage.drawRectangle({ x: 0, y: 0, width: 595, height: 842, color: pdfRgb(0.97, 0.97, 0.97) })
+        // 중앙 박스코드
+        const fs1 = 52, fs2 = 32, fs3 = 20
+        const w1 = font.widthOfTextAtSize(label1, fs1)
+        coverPage.drawText(label1, { x: (595 - w1) / 2, y: 480, size: fs1, font, color: pdfRgb(0.1, 0.1, 0.1) })
+        if (label2) {
+          const w2 = font.widthOfTextAtSize(label2, fs2)
+          coverPage.drawText(label2, { x: (595 - w2) / 2, y: 410, size: fs2, font, color: pdfRgb(0.3, 0.3, 0.3) })
+        }
+        const typeLabel = isPallet ? 'PALLET LABEL' : 'CARTON LABEL'
+        const w3 = font.widthOfTextAtSize(typeLabel, fs3)
+        coverPage.drawText(typeLabel, { x: (595 - w3) / 2, y: 350, size: fs3, font, color: pdfRgb(0.6, 0.6, 0.6) })
+        // 구분선
+        coverPage.drawLine({ start: { x: 80, y: 340 }, end: { x: 515, y: 340 }, thickness: 1, color: pdfRgb(0.8, 0.8, 0.8) })
+      }
+
+      // ── 파렛트 라벨 표지 헬퍼 (fc센터, 파렛트범위) ──────────
+      async function makePalletCoverPage(doc: typeof PDFDocument.prototype, fbaId: string, fc: string, pltRange: string) {
+        const { StandardFonts, rgb: pdfRgb } = await import('pdf-lib')
+        const coverPage = doc.addPage([595, 842])
+        let font: Awaited<ReturnType<typeof doc.embedFont>>
+        try { font = await doc.embedFont(StandardFonts.HelveticaBold) }
+        catch { font = await doc.embedFont(StandardFonts.Helvetica) }
+        coverPage.drawRectangle({ x: 0, y: 0, width: 595, height: 842, color: pdfRgb(0.95, 0.97, 1.0) })
+        const lines = [
+          { text: 'PALLET LABEL', size: 20, y: 680, color: pdfRgb(0.5, 0.5, 0.5) },
+          { text: fc, size: 48, y: 580, color: pdfRgb(0.05, 0.05, 0.2) },
+          { text: pltRange, size: 36, y: 490, color: pdfRgb(0.1, 0.1, 0.1) },
+          { text: fbaId, size: 22, y: 420, color: pdfRgb(0.35, 0.35, 0.35) },
+        ]
+        for (const l of lines) {
+          const w = font.widthOfTextAtSize(l.text, l.size)
+          coverPage.drawText(l.text, { x: Math.max(40, (595 - w) / 2), y: l.y, size: l.size, font, color: l.color })
+        }
+        coverPage.drawLine({ start: { x: 80, y: 410 }, end: { x: 515, y: 410 }, thickness: 1, color: pdfRgb(0.75, 0.75, 0.75) })
+      }
+
       for (const [loc, entries] of Object.entries(locMap)) {
         let totalKept = 0
         const outDoc = await PDFDocument.create()
 
+        // 앞 표지 페이지
+        await makeCoverPage(outDoc, loc, false)
+
         for (const entry of entries) {
-          // 매번 새로운 slice로 로드 → ArrayBuffer detach 방지
           const srcDoc = await PDFDocument.load(entry.fileBytes.slice())
           const [copiedPage] = await outDoc.copyPages(srcDoc, [entry.pageIdx])
 
           if (entry.labelsToKeep.length > 0) {
-            // 혼합 페이지: 다른 SKU 라벨 위치를 흰색으로 마스킹
             const { width, height } = copiedPage.getSize()
             const cols = 2
             const rows = Math.ceil(entry.totalLabels / cols)
             const cellW = width / cols
             const cellH = height / rows
-
             for (let idx = 0; idx < entry.totalLabels; idx++) {
               if (!entry.labelsToKeep.includes(idx)) {
                 const col = idx % cols
                 const row = Math.floor(idx / cols)
-                // PDF 좌표: 원점=좌하단, Y는 아래서 위로
                 const x = col * cellW
                 const y = height - (row + 1) * cellH
                 copiedPage.drawRectangle({ x, y, width: cellW, height: cellH, color: rgb(1, 1, 1), opacity: 1 })
@@ -529,18 +597,101 @@ export default function ShipmentApp() {
           } else {
             totalKept += entry.totalLabels
           }
-
           outDoc.addPage(copiedPage)
         }
+
+        // 뒤 표지 페이지
+        await makeCoverPage(outDoc, loc, false)
 
         counts[loc] = totalKept
         result[loc] = await outDoc.save()
       }
 
+      // ── 파렛트 라벨 PDF 처리 ──────────────────────────────────
+      // pltLabelFiles에서 FBA ID, FC센터, 파렛트범위 추출 → pltNotes 자동 업데이트
+      if (pltFiles.length > 0) {
+        setLabelStatus("파렛트 라벨 처리 중...")
+        const newPltNotes: Record<string, string> = { ...pltNotes }
+
+        for (const f of pltFiles) {
+          const bytes = new Uint8Array(await f.arrayBuffer())
+          const pdf2 = await pdfjsLib.getDocument(getPdfjsOpts(bytes)).promise
+          let maxPlt = 0, detectedFbaId = '', detectedFc = ''
+
+          for (let pi = 0; pi < pdf2.numPages; pi++) {
+            const page = await pdf2.getPage(pi + 1)
+            const content = await page.getTextContent()
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const tokens = (content.items as any[]).map((it) => (it.str || '').trim()).filter(Boolean)
+            const pageText = tokens.join(' ')
+
+            // FBA ID 추출
+            const fbaMatch = pageText.match(/FBA[A-Z0-9]{8,12}/)
+            if (fbaMatch && !detectedFbaId) detectedFbaId = fbaMatch[0]
+
+            // 파렛트 번호 추출: パレット #： N/TOTAL または #: N/TOTAL
+            const pltMatch = pageText.match(/[Pp]al(?:let|レット)\s*#[：:]\s*(\d+)\s*\/\s*(\d+)/i) ||
+              pageText.match(/#[：:]\s*(\d+)\s*\/\s*(\d+)/)
+            if (pltMatch) {
+              const total = parseInt(pltMatch[2])
+              if (total > maxPlt) maxPlt = total
+            }
+
+            // 파일명에서 FBA ID 추출 (폰트 못 읽을 경우 fallback)
+            if (!detectedFbaId) {
+              const fnMatch = f.name.match(/^(FBA[A-Z0-9]+)/)
+              if (fnMatch) detectedFbaId = fnMatch[1]
+            }
+
+            // FC센터 추출: 納品先: XXX - ... 에서 코드 4자리 추출
+            const fcMatch = pageText.match(/(?:納品先|TPB|HIY|VNB|VJNB)\s*[\s:\-]?\s*([A-Z]{3,6})\b/)
+            if (fcMatch && !detectedFc) detectedFc = fcMatch[1]
+            // 또는 토큰에서 4자 알파벳 직접 찾기
+            if (!detectedFc) {
+              for (const tok of tokens) {
+                if (/^[A-Z]{3,5}$/.test(tok) && !['FBA','SKU','IXD'].includes(tok)) {
+                  detectedFc = tok; break
+                }
+              }
+            }
+          }
+          pdf2.destroy()
+
+          if (detectedFbaId && maxPlt > 0) {
+            const pltRange = `1~${maxPlt}番`
+            // 해당 FBA ID를 가진 약호 찾아 pltNotes 업데이트
+            for (const [sku, meta] of Object.entries(s2meta)) {
+              const metaFbaId = meta.fbaId?.replace(/U\d+$/, '').toUpperCase()
+              const targetPrefix = detectedFbaId.replace(/U\d+$/, '').toUpperCase()
+              if (metaFbaId && metaFbaId === targetPrefix) {
+                const ctnNums2 = [...new Set(fd.map(r=>r.container_no as number))]
+                for (const no of ctnNums2) {
+                  const key = `${no}_${sku}`
+                  newPltNotes[key] = pltRange
+                }
+              }
+            }
+            // 파렛트 라벨 PDF도 표지 달아서 결과에 포함
+            const pltKey = `__PLT__${detectedFc||detectedFbaId}`
+            if (!result[pltKey]) {
+              const pltDoc = await PDFDocument.create()
+              await makePalletCoverPage(pltDoc, detectedFbaId, detectedFc, `1~${maxPlt}番`)
+              const srcPlt = await PDFDocument.load(bytes.slice())
+              const pltPages = await pltDoc.copyPages(srcPlt, Array.from({length: srcPlt.getPageCount()}, (_,i)=>i))
+              pltPages.forEach(p => pltDoc.addPage(p))
+              await makePalletCoverPage(pltDoc, detectedFbaId, detectedFc, `1~${maxPlt}番`)
+              result[pltKey] = await pltDoc.save()
+              counts[pltKey] = maxPlt
+            }
+          }
+        }
+        setPltNotes(newPltNotes)
+      }
+
       setLabelGroups(result)
       setLabelCounts(counts)
       const unmatchedPages = debugLog.filter(d => !d.matchedLoc).length
-      setLabelStatus(`완료 — ${Object.keys(result).length}개 BOX CODE 분류됨${unmatchedPages > 0 ? ` (미매칭 ${unmatchedPages}페이지)` : ""}`)
+      setLabelStatus(`완료 — ${Object.keys(result).filter(k=>!k.startsWith('__PLT__')).length}개 BOX CODE + ${Object.keys(result).filter(k=>k.startsWith('__PLT__')).length}개 파렛트 분류됨${unmatchedPages > 0 ? ` (미매칭 ${unmatchedPages}페이지)` : ""}`)
       if (unmatchedPages > 0) setShowDebug(true)
 
     } catch (e) {
@@ -551,24 +702,27 @@ export default function ShipmentApp() {
     }
   }
 
-  // loc → 약호 헬퍼 (파일명 + 인터페이스 표시용)
+  // loc → 약호/realSku 헬퍼
   function locToSku(loc: string): string {
-    for (const [sku, m] of Object.entries(master)) {
-      if (m.loc === loc) return sku
-    }
+    for (const [sku, m] of Object.entries(master)) { if (m.loc === loc) return sku }
     return ''
   }
-
-  // "J-09-W (HS904018-5W)" 형태로 표시
-  function locLabel(loc: string): string {
-    const sku = locToSku(loc)
-    return sku ? `${loc} (${sku})` : loc
+  function locToRealSku(loc: string): string {
+    for (const m of Object.values(master)) { if (m.loc === loc) return m.sku || '' }
+    return ''
   }
-
-  function dlLabel(loc:string,bytes:Uint8Array){
+  function locLabel(loc: string): string {
+    const realSku = locToRealSku(loc)
     const sku = locToSku(loc)
-    const filename = sku ? `${loc} (${sku}).pdf` : `${loc}.pdf`
-    const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([bytes],{type:'application/pdf'}));a.download=filename;a.click()
+    return (realSku||sku) ? `${loc} (${realSku||sku})` : loc
+  }
+  function dlLabel(loc: string, bytes: Uint8Array) {
+    const realSku = locToRealSku(loc)
+    const sku = locToSku(loc)
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }))
+    a.download = `${loc} (${realSku||sku||loc}).pdf`
+    a.click()
   }
   function dlAllLabels(){Object.entries(labelGroups).forEach(([l,b])=>dlLabel(l,b))}
 
@@ -590,11 +744,11 @@ export default function ShipmentApp() {
       {/* 내비 */}
       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:16}}>
         <div style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",overflow:"hidden",display:"flex"}}>
-          <NavBtn m="1" label="① 업로드"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
-          <NavBtn m="2" label="② 1차 가공"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
-          <NavBtn m="label" label="② 라벨 분류"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
-          <NavBtn m="logistics" label="2.5 물류 전달"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
-          <NavBtn m="3" label="③ 2차 가공"/>
+          <NavBtn m="1" label="1. 업로드"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
+          <NavBtn m="2" label="2. 1차 가공"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
+          <NavBtn m="label" label="2. 라벨 분류"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
+          <NavBtn m="logistics" label="2-5. 물류 전달"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
+          <NavBtn m="3" label="3. 2차 가공"/>
         </div>
         <button onClick={()=>setMode('map')} style={{marginLeft:"auto",fontSize:11,padding:"6px 14px",background:mode==='map'?"var(--color-background-secondary)":"transparent",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",cursor:"pointer",color:mode==='map'?"var(--color-text-primary)":"var(--color-text-secondary)"}}>매핑 관리</button>
       </div>
@@ -666,19 +820,31 @@ export default function ShipmentApp() {
       {mode==='label'&&(
         <div>
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14,flexWrap:"wrap"}}>
-            <span style={{fontSize:12,color:"var(--color-text-secondary)"}}>FBA 카톤 라벨 PDF → SKU 자동 인식 → BOX CODE별 분류 (혼합 페이지 자동 마스킹)</span>
+            <span style={{fontSize:12,color:"var(--color-text-secondary)"}}>카톤 + 파렛트 라벨 PDF → BOX CODE별 분류 · 표지 자동 삽입</span>
             {Object.keys(labelGroups).length>0&&(<button onClick={dlAllLabels} style={{marginLeft:"auto",fontSize:11,padding:"3px 12px",background:"var(--color-background-success)",border:"0.5px solid var(--color-border-success)",color:"var(--color-text-success)",borderRadius:"var(--border-radius-md)",cursor:"pointer",fontWeight:500}}>전체 다운로드</button>)}
           </div>
 
-          {/* 업로드 드롭존 */}
-          <div onClick={()=>!labelLoading&&labelRef.current?.click()} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();const fs=Array.from(e.dataTransfer.files).filter(f=>f.type==='application/pdf');if(fs.length&&!labelLoading){setLabelFiles(fs);processLabels(fs)}}} style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"32px",border:"1px dashed var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",cursor:labelLoading?"default":"pointer",marginBottom:16,gap:8,background:labelLoading?"var(--color-background-secondary)":"transparent"}}>
-            <span style={{fontSize:32}}>{labelLoading?"⏳":"📄"}</span>
-            <span style={{fontSize:13,color:"var(--color-text-secondary)",textAlign:"center"}}>{labelLoading?labelStatus:labelFiles.length?`${labelFiles.length}개 파일 처리 완료 (${labelStatus}) — 다시 업로드하려면 클릭`:"FBA 카톤 라벨 PDF 업로드 (여러 파일 동시 가능)"}</span>
-            {!labelLoading&&(<span style={{fontSize:11,color:"var(--color-text-tertiary)"}}>페이지 내 SKU 텍스트 인식 · 혼합 페이지는 흰색 마스킹으로 분리</span>)}
-          </div>
-          <input ref={labelRef} type="file" accept="application/pdf" multiple style={{display:"none"}} onChange={e=>{const fs=Array.from(e.target.files||[]);if(fs.length){setLabelFiles(fs);processLabels(fs)}}}/>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
+            {/* 카톤 라벨 드롭존 */}
+            <div>
+              <div style={{fontSize:11,color:"var(--color-text-tertiary)",marginBottom:6,fontWeight:500}}>카톤 라벨 PDF</div>
+              <div onClick={()=>!labelLoading&&labelRef.current?.click()} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();const fs=Array.from(e.dataTransfer.files).filter(f=>f.type==='application/pdf');if(fs.length&&!labelLoading){setLabelFiles(fs);processLabels(fs,pltLabelFiles)}}} style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"24px 16px",border:"1px dashed var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",cursor:labelLoading?"default":"pointer",gap:6,background:labelLoading?"var(--color-background-secondary)":"transparent",minHeight:100}}>
+                <span style={{fontSize:28}}>{labelLoading?"⏳":"📄"}</span>
+                <span style={{fontSize:12,color:"var(--color-text-secondary)",textAlign:"center"}}>{labelLoading?labelStatus:labelFiles.length?`${labelFiles.length}개 파일 (${labelStatus})`:"카톤 라벨 업로드"}</span>
+              </div>
+              <input ref={labelRef} type="file" accept="application/pdf" multiple style={{display:"none"}} onChange={e=>{const fs=Array.from(e.target.files||[]);if(fs.length){setLabelFiles(fs);processLabels(fs,pltLabelFiles)}}}/>
+            </div>
 
-          {/* 결과 테이블 + 수량 비교 */}
+            {/* 파렛트 라벨 드롭존 */}
+            <div>
+              <div style={{fontSize:11,color:"var(--color-text-tertiary)",marginBottom:6,fontWeight:500}}>파렛트 라벨 PDF <span style={{color:"var(--color-text-info)"}}>→ 파렛트 번호 자동 인식</span></div>
+              <div onClick={()=>!labelLoading&&pltLabelRef.current?.click()} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();const fs=Array.from(e.dataTransfer.files).filter(f=>f.type==='application/pdf');if(fs.length&&!labelLoading){setPltLabelFiles(fs);if(labelFiles.length)processLabels(labelFiles,fs)}}} style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"24px 16px",border:"1px dashed var(--color-border-info)",borderRadius:"var(--border-radius-md)",cursor:labelLoading?"default":"pointer",gap:6,background:pltLabelFiles.length?"rgba(219,234,254,0.15)":"transparent",minHeight:100}}>
+                <span style={{fontSize:28}}>{pltLabelFiles.length?"🏷️":"📋"}</span>
+                <span style={{fontSize:12,color:"var(--color-text-secondary)",textAlign:"center"}}>{pltLabelFiles.length?`${pltLabelFiles.length}개 파일 — FBA ID/FC센터/파렛트번호 자동 추출`:"파렛트 라벨 업로드 (선택)"}</span>
+              </div>
+              <input ref={pltLabelRef} type="file" accept="application/pdf" multiple style={{display:"none"}} onChange={e=>{const fs=Array.from(e.target.files||[]);if(fs.length){setPltLabelFiles(fs);if(labelFiles.length)processLabels(labelFiles,fs)}}}/>
+            </div>
+          </div>
           {Object.keys(labelGroups).length>0&&!labelLoading&&(
             <div style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",overflow:"hidden",marginBottom:12}}>
               <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
@@ -691,19 +857,20 @@ export default function ShipmentApp() {
                   <th style={TH}></th>
                 </tr></thead>
                 <tbody>{Object.entries(labelGroups).sort(([a],[b])=>a.localeCompare(b)).map(([loc,bytes],i)=>{
-                  // 1차 가공에서 해당 BOX CODE(loc)에 해당하는 총 수량 찾기
-                  const s2qty = s2rows.filter(r=>r.loc===loc).reduce((s,r)=>s+r.total,0)
+                  const isPlt = loc.startsWith('__PLT__')
+                  const displayLoc = isPlt ? `[파렛트] ${loc.replace('__PLT__','')}` : locLabel(loc)
+                  const s2qty = isPlt ? 0 : s2rows.filter(r=>r.loc===loc).reduce((s,r)=>s+r.total,0)
                   const labelQty = labelCounts[loc]||0
                   const diff = labelQty - s2qty
-                  const hasData = s2qty > 0
-                  const isOk = diff === 0
+                  const hasData = !isPlt && s2qty > 0
+                  const isOk = !isPlt && diff === 0
                   return(
-                  <tr key={loc} style={{background:i%2===0?"transparent":"var(--color-background-secondary)"}}>
-                    <td style={{...TD,fontWeight:500}}>{locLabel(loc)}</td>
-                    <td style={{...TD,textAlign:"right",fontWeight:500}}>{labelQty.toLocaleString()}장</td>
+                  <tr key={loc} style={{background:isPlt?"rgba(219,234,254,0.12)":i%2===0?"transparent":"var(--color-background-secondary)"}}>
+                    <td style={{...TD,fontWeight:500,color:isPlt?"var(--color-text-info)":"var(--color-text-primary)"}}>{displayLoc}</td>
+                    <td style={{...TD,textAlign:"right",fontWeight:500}}>{isPlt?`${labelQty}파렛트`:labelQty.toLocaleString()+"장"}</td>
                     <td style={{...TD,textAlign:"right",color:"var(--color-text-secondary)"}}>{hasData?s2qty.toLocaleString()+"개":"—"}</td>
-                    <td style={{...TD,textAlign:"right",fontWeight:500,color:!hasData?"var(--color-text-tertiary)":isOk?"var(--color-text-success)":Math.abs(diff)<=3?"#f59e0b":"var(--color-text-danger)"}}>
-                      {!hasData?"—":isOk?"✅ 일치":diff>0?`+${diff} 초과`:`${diff} 부족`}
+                    <td style={{...TD,textAlign:"right",fontWeight:500,color:isPlt?"var(--color-text-tertiary)":!hasData?"var(--color-text-tertiary)":isOk?"var(--color-text-success)":Math.abs(diff)<=3?"#f59e0b":"var(--color-text-danger)"}}>
+                      {isPlt?"—":!hasData?"—":isOk?"✅ 일치":diff>0?`+${diff} 초과`:`${diff} 부족`}
                     </td>
                     <td style={{...TD,textAlign:"right",color:"var(--color-text-secondary)"}}>{(bytes.length/1024).toFixed(0)}KB</td>
                     <td style={TD}><button onClick={()=>dlLabel(loc,bytes)} style={{fontSize:11,padding:"2px 10px",cursor:"pointer",borderRadius:4,border:"0.5px solid var(--color-border-secondary)",background:"transparent"}}>↓ PDF</button></td>
