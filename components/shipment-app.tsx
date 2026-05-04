@@ -241,6 +241,13 @@ export default function ShipmentApp() {
 
       const pdfjsLib = await loadPdfjs()
       const { PDFDocument, rgb } = await import('pdf-lib')
+      const getDocOpts = (bytes: Uint8Array) => ({
+        data: bytes.slice(),
+        useSystemFonts: true,
+        cMapUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/',
+        cMapPacked: true,
+        standardFontDataUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/standard_fonts/',
+      })
 
       type PageEntry = {
         fileBytes: Uint8Array      // 원본 PDF 바이트 (Uint8Array, 매번 slice로 복사)
@@ -261,14 +268,14 @@ export default function ShipmentApp() {
 
       for (const f of files) {
         const bytes = new Uint8Array(await f.arrayBuffer())
-        const pdf = await pdfjsLib.getDocument({ data: bytes.slice() }).promise
+        const pdf = await pdfjsLib.getDocument(getDocOpts(bytes)).promise
         totalPages += pdf.numPages
         pdf.destroy()
       }
 
       for (const f of files) {
         const fileBytes = new Uint8Array(await f.arrayBuffer())
-        const pdf = await pdfjsLib.getDocument({ data: fileBytes.slice() }).promise
+        const pdf = await pdfjsLib.getDocument(getDocOpts(fileBytes)).promise
 
         for (let i = 0; i < pdf.numPages; i++) {
           const page = await pdf.getPage(i + 1)
