@@ -262,6 +262,16 @@ export default function ShipmentApp() {
       const pdfjsLib = await loadPdfjs()
       const { PDFDocument, rgb } = await import('pdf-lib')
 
+      // pdfjs 옵션: cMap 로드로 일본어 폰트 지원
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const getPdfjsOpts = (data: Uint8Array): any => ({
+        data: data.slice(),
+        cMapUrl: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/cmaps/',
+        cMapPacked: true,
+        useWorkerFetch: false,
+        isEvalSupported: false,
+      })
+
       type PageEntry = {
         fileBytes: Uint8Array
         pageIdx: number
@@ -277,14 +287,14 @@ export default function ShipmentApp() {
       // 전체 페이지 수
       for (const f of files) {
         const bytes = new Uint8Array(await f.arrayBuffer())
-        const pdf = await pdfjsLib.getDocument({ data: bytes.slice() }).promise
+        const pdf = await pdfjsLib.getDocument(getPdfjsOpts(bytes)).promise
         totalPages += pdf.numPages
         pdf.destroy()
       }
 
       for (const f of files) {
         const fileBytes = new Uint8Array(await f.arrayBuffer())
-        const pdf = await pdfjsLib.getDocument({ data: fileBytes.slice() }).promise
+        const pdf = await pdfjsLib.getDocument(getPdfjsOpts(fileBytes)).promise
 
         // ── 파일 단위 FBA ID prefix 매칭 ─────────────────────
         // pdfjs가 폰트를 못 읽어 SKU가 추출 안 되는 경우의 폴백
@@ -721,7 +731,32 @@ export default function ShipmentApp() {
             <button onClick={()=>{if(confirm("초기화하시겠습니까?"))setMaster(Object.fromEntries(Object.entries(MASTER_INIT).map(([k,v])=>[k,{...v}])))}} style={{fontSize:11,padding:"3px 10px",color:"var(--color-text-danger)",border:"0.5px solid var(--color-border-danger)",borderRadius:"var(--border-radius-md)",background:"transparent",cursor:"pointer"}}>초기화</button>
             <button onClick={()=>xlsDl(Object.entries(master).map(([sku,m])=>({약호:sku,SKU:m.sku,ASIN:m.asin,구박스:m.to,신박스:m.loc,PLT당카톤:m.cpp,FBA비용:m.fba,판매가:m.price,무게kg:m.kg,박스가로:m.bx,박스세로:m.by,박스높이:m.bz})),"마스터","SKU마스터.xlsx")} style={{fontSize:11,padding:"3px 10px"}}>xlsx 저장</button>
           </div>
-          <div style={{marginBottom:8,padding:"5px 10px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",fontSize:11,color:"var(--color-text-secondary)"}}>💾 마스터 데이터는 브라우저에 자동 저장됩니다 (재배포 후에도 유지)</div>
+          {/* JSON 백업/복원 */}
+          <div style={{marginBottom:8,padding:"8px 12px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",fontSize:11,color:"var(--color-text-secondary)",border:"0.5px solid var(--color-border-tertiary)",display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+            <span>💾 재배포 후 데이터 초기화 방지 — JSON으로 백업 후 복원하세요</span>
+            <button onClick={()=>{
+              const data={master,s2meta,ctnMeta,_v:1,_date:new Date().toISOString()}
+              const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"})
+              const a=document.createElement("a");a.href=URL.createObjectURL(blob)
+              a.download="shipment_backup_"+new Date().toISOString().slice(0,10)+".json";a.click()
+            }} style={{fontSize:11,padding:"3px 10px",cursor:"pointer",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",background:"var(--color-background-primary)",color:"var(--color-text-primary)",fontWeight:500}}>⬇ JSON 백업</button>
+            <label style={{fontSize:11,padding:"3px 10px",cursor:"pointer",border:"0.5px solid var(--color-border-info)",borderRadius:"var(--border-radius-md)",background:"rgba(219,234,254,0.3)",color:"var(--color-text-info)",fontWeight:500}}>
+              ⬆ JSON 복원
+              <input type="file" accept=".json" style={{display:"none"}} onChange={e=>{
+                const f=e.target.files?.[0];if(!f)return
+                const rd=new FileReader();rd.onload=ev=>{
+                  try{
+                    const d=JSON.parse(ev.target?.result as string)
+                    if(d.master)setMaster(d.master)
+                    if(d.s2meta)setS2meta(d.s2meta)
+                    if(d.ctnMeta)setCtnMeta(d.ctnMeta)
+                    alert("복원 완료!")
+                  }catch{alert("JSON 파일이 올바르지 않습니다")}
+                };rd.readAsText(f)
+                e.target.value=""
+              }}/>
+            </label>
+          </div>
           <div style={{overflowX:"auto",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)"}}>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
               <thead><tr>{["약호","SKU","ASIN","구박스","신박스","PLT당카톤","FBA비용(¥)","판매가(¥)","무게(kg)","박스가로","박스세로","박스높이",""].map(h=><th key={h} style={TH}>{h}</th>)}</tr></thead>
