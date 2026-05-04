@@ -221,21 +221,40 @@ export default function ShipmentApp() {
     let font: any
     try { font = await (doc as any).embedFont(StandardFonts.HelveticaBold) }
     catch { font = await (doc as any).embedFont(StandardFonts.Helvetica) }
+
     const realSku = locToRealSku(loc)
     const sku = locToSku(loc)
-    coverPage.drawRectangle({ x: 0, y: 0, width: 595, height: 842, color: pdfRgb(0.97, 0.97, 0.97) })
-    const fs1 = 52, fs2 = 32, fs3 = 20
-    const w1 = font.widthOfTextAtSize(loc, fs1)
-    coverPage.drawText(loc, { x: (595 - w1) / 2, y: 480, size: fs1, font, color: pdfRgb(0.1, 0.1, 0.1) })
+
+    // 배경
+    coverPage.drawRectangle({ x: 0, y: 0, width: 595, height: 842, color: pdfRgb(0.96, 0.96, 0.96) })
+    // 상단 짙은 회색 바
+    coverPage.drawRectangle({ x: 0, y: 742, width: 595, height: 100, color: pdfRgb(0.15, 0.15, 0.15) })
+    // CARTON LABEL 헤더
+    const title = 'CARTON LABEL'
+    const tw = font.widthOfTextAtSize(title, 26)
+    coverPage.drawText(title, { x: (595 - tw) / 2, y: 790, size: 26, font, color: pdfRgb(0.85, 0.85, 0.85) })
+
+    // BOX CODE (크게)
+    const locSize = loc.length <= 7 ? 100 : 72
+    const locW = font.widthOfTextAtSize(loc, locSize)
+    coverPage.drawText(loc, { x: (595 - locW) / 2, y: 560, size: locSize, font, color: pdfRgb(0.08, 0.08, 0.08) })
+
+    // 구분선
+    coverPage.drawLine({ start: {x: 60, y: 540}, end: {x: 535, y: 540}, thickness: 2, color: pdfRgb(0.6, 0.6, 0.65) })
+
+    // realSku (중간 크기)
     const label2 = realSku || sku || ''
     if (label2) {
-      const w2 = font.widthOfTextAtSize(label2, fs2)
-      coverPage.drawText(label2, { x: (595 - w2) / 2, y: 410, size: fs2, font, color: pdfRgb(0.3, 0.3, 0.3) })
+      const fs2 = label2.length > 25 ? 24 : 32
+      const lw2 = font.widthOfTextAtSize(label2, fs2)
+      coverPage.drawText(label2, { x: Math.max(40, (595 - lw2) / 2), y: 460, size: fs2, font, color: pdfRgb(0.25, 0.25, 0.3) })
     }
-    const typeLabel = 'CARTON LABEL'
-    const w3 = font.widthOfTextAtSize(typeLabel, fs3)
-    coverPage.drawText(typeLabel, { x: (595 - w3) / 2, y: 350, size: fs3, font, color: pdfRgb(0.6, 0.6, 0.6) })
-    coverPage.drawLine({ start: { x: 80, y: 340 }, end: { x: 515, y: 340 }, thickness: 1, color: pdfRgb(0.8, 0.8, 0.8) })
+
+    // 하단 바
+    coverPage.drawRectangle({ x: 0, y: 0, width: 595, height: 40, color: pdfRgb(0.15, 0.15, 0.15) })
+    const sub2 = 'FBA CARTON SHIPPING LABEL'
+    const sw2 = font.widthOfTextAtSize(sub2, 13)
+    coverPage.drawText(sub2, { x: (595 - sw2) / 2, y: 13, size: 13, font, color: pdfRgb(0.65, 0.65, 0.65) })
   }
 
   // ── 파렛트 표지 페이지 생성 ───────────────────────────────────
@@ -331,9 +350,24 @@ export default function ShipmentApp() {
           const pltMatch = pageText.match(/#[：:]\s*(\d+)\s*\/\s*(\d+)/)
           if (pltMatch) { const total = parseInt(pltMatch[2]); if (total > maxPlt) maxPlt = total }
           if (!detectedFbaId) { const fnMatch = f.name.match(/^(FBA[A-Z0-9]+)/); if (fnMatch) detectedFbaId = fnMatch[1] }
-          const fcMatch = pageText.match(/(?:納品先|TPB|HIY|VNB|VJNB)\s*[\s:\-]?\s*([A-Z]{3,6})\b/)
-          if (fcMatch && !detectedFc) detectedFc = fcMatch[1]
-          if (!detectedFc) { for (const tok of tokens) { if (/^[A-Z]{3,5}$/.test(tok) && !['FBA','SKU','IXD'].includes(tok)) { detectedFc = tok; break } } }
+          // FC센터 추출: 납품선 코드는 보통 3~5자 대문자 (HIY1, TPB5, VJNB 등)
+          // 파렛트 라벨에서 "納品先:\nXXXX\n" 또는 "FBA STA (...)-XXXX" 패턴
+          if (!detectedFc) {
+            const staMatch = pageText.match(/FBA\s+STA\s+[^-]+-([A-Z]{3,5})\b/)
+            if (staMatch) detectedFc = staMatch[1]
+          }
+          if (!detectedFc) {
+            // "HIY1 - AMXL" 또는 "TPB5\n1980024" 패턴: 숫자 포함 4~5자 코드
+            const codeMatch = pageText.match(/\b([A-Z]{2,4}\d{1,2})\b/)
+            if (codeMatch && !['FBA'].includes(codeMatch[1])) detectedFc = codeMatch[1]
+          }
+          if (!detectedFc) {
+            for (const tok of tokens) {
+              if (/^[A-Z]{3,5}\d?$/.test(tok) && !['FBA','SKU','IXD','STA','IXD','AMXL'].includes(tok) && tok !== detectedFbaId) {
+                detectedFc = tok; break
+              }
+            }
+          }
         }
         pdf2.destroy()
 
@@ -732,14 +766,18 @@ export default function ShipmentApp() {
               const fnMatch = f.name.match(/^(FBA[A-Z0-9]+)/)
               if (fnMatch) detectedFbaId = fnMatch[1]
             }
-
-            // FC센터 추출: 納品先: XXX - ... 에서 코드 4자리 추출
-            const fcMatch = pageText.match(/(?:納品先|TPB|HIY|VNB|VJNB)\s*[\s:\-]?\s*([A-Z]{3,6})\b/)
-            if (fcMatch && !detectedFc) detectedFc = fcMatch[1]
-            // 또는 토큰에서 4자 알파벳 직접 찾기
+            // FC센터 추출: "FBA STA (...)-HIY1" 패턴이 가장 확실
+            if (!detectedFc) {
+              const staMatch = pageText.match(/FBA\s+STA\s+[^-]+-([A-Z]{3,5})\b/)
+              if (staMatch) detectedFc = staMatch[1]
+            }
+            if (!detectedFc) {
+              const codeMatch = pageText.match(/\b([A-Z]{2,4}\d{1,2})\b/)
+              if (codeMatch && !['FBA'].includes(codeMatch[1])) detectedFc = codeMatch[1]
+            }
             if (!detectedFc) {
               for (const tok of tokens) {
-                if (/^[A-Z]{3,5}$/.test(tok) && !['FBA','SKU','IXD'].includes(tok)) {
+                if (/^[A-Z]{3,5}\d?$/.test(tok) && !['FBA','SKU','IXD','STA','AMXL'].includes(tok) && tok !== detectedFbaId) {
                   detectedFc = tok; break
                 }
               }
@@ -1135,8 +1173,8 @@ export default function ShipmentApp() {
           const FC_BG: Record<string,string> = { HIY1:'#1e3a8a', TPB5:'#14532d', VJNB:'#78350f', TPB8:'#6b21a8' }
           const FC_ROW: Record<string,string> = { HIY1:'#dbeafe', TPB5:'#dcfce7', VJNB:'#fef9c3', TPB8:'#f3e8ff' }
 
-          // 컨테이너 2개씩 한 페이지에 넣거나 각각 한 페이지 — 모두 page-break로 분리
-          const ctnBlocks = ctnGroups.map((g, gi) => {
+          // 자연스럽게 흐르는 레이아웃 — break-inside:avoid로 찢기지 않게
+          const ctnBlocks = ctnGroups.map((g) => {
             const ctnSumQ = g.rows.reduce((s,r)=>s+r.qty,0)
             const ctnSumP = g.rows.reduce((s,r)=>s+r.pallets,0)
             const dataRows = g.rows.map(r => {
@@ -1153,13 +1191,13 @@ export default function ShipmentApp() {
                 <td class="pltno">${r.plt||'—'}</td>
               </tr>`
             }).join('')
-            return `<div class="ctn-block${gi>0?' page-break':''}">
-              <div class="ctn-title">
-                <span class="ctn-badge">컨${g.no}</span>
-                <span class="ctn-info">${g.ctn}${g.date?' &nbsp;·&nbsp; '+g.date:''}${g.dest?' &nbsp;·&nbsp; '+g.dest:''}</span>
-                <span class="ctn-summary">${ctnSumQ.toLocaleString()}개 &nbsp;/&nbsp; ${ctnSumP}파렛트</span>
-              </div>
+            return `<div class="ctn-block">
+              <div class="ctn-title"><span class="ctn-badge">컨${g.no}</span></div>
               <table>
+                <colgroup>
+                  <col style="width:100px"><col style="width:155px"><col style="width:75px">
+                  <col style="width:78px"><col style="width:65px"><col style="width:60px"><col style="width:87px">
+                </colgroup>
                 <thead>
                   <tr class="gh">
                     <th colspan="3" class="carton-h">카톤 라벨</th>
@@ -1168,13 +1206,13 @@ export default function ShipmentApp() {
                   </tr>
                   <tr class="ch">
                     <th>약호</th><th>Merchant SKU</th><th>신박스코드</th>
-                    <th>카톤수량</th><th>파렛트</th>
+                    <th>카톤</th><th>파렛트</th>
                     <th>FC센터</th><th>파렛트번호</th>
                   </tr>
                 </thead>
                 <tbody>${dataRows}
                   <tr class="sub-total">
-                    <td colspan="3">컨${g.no} 소계</td>
+                    <td colspan="3">소계</td>
                     <td>${ctnSumQ.toLocaleString()}</td>
                     <td>${ctnSumP}</td>
                     <td colspan="2"></td>
@@ -1187,46 +1225,36 @@ export default function ShipmentApp() {
           const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
-  @page{size:A4 landscape;margin:8mm 10mm}
+  @page{size:A4 landscape;margin:7mm 9mm}
   *{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}
   body{font-family:'Malgun Gothic','Arial',sans-serif;font-size:13px;margin:0;padding:0;color:#111}
-  .page-break{page-break-before:always}
-  .report-header{margin-bottom:14px;border-bottom:3px solid #0f172a;padding-bottom:8px}
-  .report-title{font-size:22px;font-weight:800;color:#0f172a;margin:0 0 4px}
-  .report-sub{font-size:12px;color:#475569}
-  .ctn-block{margin-bottom:20px}
-  .ctn-title{display:flex;align-items:center;gap:12px;background:#0f172a;color:#fff;padding:10px 14px;border-radius:4px 4px 0 0;margin-bottom:0}
-  .ctn-badge{font-size:20px;font-weight:800;background:#1e40af;padding:2px 12px;border-radius:4px;flex-shrink:0}
-  .ctn-info{font-size:14px;font-weight:600;flex:1}
-  .ctn-summary{font-size:14px;font-weight:700;color:#93c5fd;white-space:nowrap}
-  table{width:100%;border-collapse:collapse;table-layout:fixed}
-  th,td{border:1.5px solid #94a3b8;padding:7px 8px;vertical-align:middle}
-  tr.gh th{font-size:13px;font-weight:700;text-align:center;padding:6px 8px}
+  .ctn-block{margin-bottom:10px;break-inside:avoid;page-break-inside:avoid}
+  .ctn-title{margin-bottom:0}
+  .ctn-badge{font-size:16px;font-weight:800;background:#0f172a;color:#fff;padding:3px 12px;border-radius:4px 4px 0 0;display:inline-block}
+  table{width:100%;border-collapse:collapse}
+  th,td{border:1.5px solid #94a3b8;padding:6px 7px;vertical-align:middle}
+  tr.gh th{font-size:12px;font-weight:700;text-align:center;padding:5px 7px}
   .carton-h{background:#1e293b;color:#fff}
   .pallet-h{background:#1e40af;color:#fff}
-  tr.ch th{background:#334155;color:#e2e8f0;font-size:12px;text-align:center;padding:6px 8px}
+  tr.ch th{background:#334155;color:#e2e8f0;font-size:11px;text-align:center;padding:5px 7px}
   td.sku{font-weight:700;font-size:13px;white-space:nowrap}
   td.rsku{color:#475569;font-size:11px;white-space:nowrap}
   td.loc{font-weight:800;color:#1e40af;text-align:center;font-size:14px}
   td.num{text-align:right;font-size:14px}
-  td.plt{text-align:right;font-weight:800;font-size:15px;color:#0f172a}
+  td.plt{text-align:right;font-weight:800;font-size:15px}
   td.fc{text-align:center;font-weight:800;font-size:14px;color:#fff;border:2px solid #0f172a}
   td.pltno{text-align:center;font-weight:800;font-size:15px;color:#1e40af}
-  tr.sub-total td{background:#334155;color:#fff;font-weight:700;font-size:13px;text-align:right}
-  tr.sub-total td:first-child{text-align:left;padding-left:12px}
-  .total-block{background:#0f172a;color:#fff;padding:10px 16px;border-radius:4px;margin-top:12px;display:flex;gap:32px;font-size:14px;font-weight:700}
-  col.c1{width:100px}col.c2{width:160px}col.c3{width:75px}col.c4{width:80px}col.c5{width:65px}col.c6{width:60px}col.c7{width:85px}
+  tr.sub-total td{background:#1e293b;color:#fff;font-weight:700;font-size:12px;text-align:right}
+  tr.sub-total td:first-child{text-align:left;padding-left:10px}
+  .total-block{background:#0f172a;color:#fff;padding:7px 12px;border-radius:4px;margin-top:8px;display:flex;gap:24px;font-size:13px;font-weight:700;break-inside:avoid;page-break-inside:avoid}
 </style>
 </head><body>
-<div class="report-header">
-  <div class="report-title">물류 전달 &nbsp; ${activeSheet||''}</div>
-  <div class="report-sub">출력일: ${new Date().toLocaleDateString('ko-KR')} &nbsp;|&nbsp; 총 ${totalQty.toLocaleString()}개 &nbsp;|&nbsp; 총 ${totalPlt}파렛트</div>
-</div>
 ${ctnBlocks}
 <div class="total-block">
-  <span>전체 합계</span>
-  <span>카톤 총 ${totalQty.toLocaleString()}개</span>
-  <span>파렛트 총 ${totalPlt}개</span>
+  <span>합계</span>
+  <span>카톤 ${totalQty.toLocaleString()}개</span>
+  <span>파렛트 ${totalPlt}개</span>
+  <span style="margin-left:auto;font-size:11px;opacity:0.6">${new Date().toLocaleDateString('ko-KR')} &nbsp; ${activeSheet||''}</span>
 </div>
 </body></html>`
 
