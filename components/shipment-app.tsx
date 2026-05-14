@@ -996,7 +996,24 @@ export default function ShipmentApp() {
                 <tr>{["약호","ASIN","구박스","신박스","카톤","PLT당카톤","팔레트","G.W(kg)","CBM"].map(h=><th key={h} style={TH}>{h}</th>)}{["FC CENTER","주소","FBA ID","아마존 ID"].map(h=><th key={h} style={{...TH,...IBLU}}>{h}</th>)}</tr>
               </thead>
               <tbody>
-                {s2rows.map((r,i)=>(<tr key={r.sku} style={{background:i%2===0?"transparent":"var(--color-background-secondary)"}}><td style={{...TD,fontWeight:500,minWidth:130}}>{r.sku}</td><td style={{...TD,fontFamily:"var(--font-mono)",fontSize:11,minWidth:100}}>{r.asin}</td><td style={{...TD,minWidth:45}}>{r.to}</td><td style={{...TD,color:"var(--color-text-info)",fontWeight:500,minWidth:70}}>{r.loc}</td><td style={{...TD,textAlign:"right",fontWeight:500,minWidth:55}}>{r.total.toLocaleString()}</td><td style={{...TD,textAlign:"center",minWidth:55}}>{r.cpp}</td><td style={{...TD,textAlign:"right",fontWeight:500,minWidth:50}}>{r.pallets}</td><td style={{...TD,textAlign:"right",minWidth:70,borderRight:"1px solid var(--color-border-tertiary)"}}>{r.gw.toFixed(1)}</td><td style={{...TD,textAlign:"right",minWidth:60,borderRight:"2px solid var(--color-border-secondary)"}}>{r.cbm}</td>{(["fc","address","fbaId","amazonId"] as const).map((f,idx)=>(<td key={f} style={{...TD,minWidth:[80,150,130,90][idx],...IBLU}}><input value={r[f]} onChange={e=>updMeta(r.sku,f,e.target.value)} style={INP} placeholder={["FC CENTER","주소","FBA ID","아마존 ID"][idx]}/></td>))}</tr>))}
+                {s2rows.map((r,i)=>(<tr key={r.sku} style={{background:i%2===0?"transparent":"var(--color-background-secondary)"}}><td style={{...TD,fontWeight:500,minWidth:130}}>{r.sku}</td><td style={{...TD,fontFamily:"var(--font-mono)",fontSize:11,minWidth:100}}>{r.asin}</td><td style={{...TD,minWidth:45}}>{r.to}</td><td style={{...TD,color:"var(--color-text-info)",fontWeight:500,minWidth:70}}>{r.loc}</td><td style={{...TD,textAlign:"right",fontWeight:500,minWidth:55}}>{r.total.toLocaleString()}</td><td style={{...TD,textAlign:"center",minWidth:55}}>{r.cpp}</td><td style={{...TD,textAlign:"right",fontWeight:500,minWidth:50}}>{r.pallets}</td><td style={{...TD,textAlign:"right",minWidth:70,borderRight:"1px solid var(--color-border-tertiary)"}}>{r.gw.toFixed(1)}</td><td style={{...TD,textAlign:"right",minWidth:60,borderRight:"2px solid var(--color-border-secondary)"}}>{r.cbm}</td>{(["fc","address","fbaId","amazonId"] as const).map((f,idx)=>(<td key={f} style={{...TD,minWidth:[80,150,130,90][idx],...IBLU}}><input
+                  value={r[f]}
+                  onChange={e=>updMeta(r.sku,f,e.target.value)}
+                  onPaste={e=>{
+                    const text = e.clipboardData.getData('text')
+                    // 줄바꿈이 있으면 멀티행 붙여넣기
+                    const lines = text.split(/\r?\n/).map(l=>l.trim()).filter((_,li)=>li===0||_!=='')
+                    if (lines.length <= 1) return // 단일행이면 기본 동작
+                    e.preventDefault()
+                    // 현재 행(i)부터 아래로 순서대로 적용
+                    lines.forEach((val, offset) => {
+                      const targetRow = s2rows[i + offset]
+                      if (targetRow) updMeta(targetRow.sku, f, val)
+                    })
+                  }}
+                  style={INP}
+                  placeholder={["FC CENTER","주소","FBA ID","아마존 ID"][idx]}
+                /></td>))}</tr>))}
               </tbody>
               <tfoot><tr style={{background:"var(--color-background-secondary)",borderTop:"2px solid var(--color-border-secondary)"}}><td colSpan={4} style={{...TD,fontWeight:500,textAlign:"right"}}>합계</td><td style={{...TD,fontWeight:500,textAlign:"right"}}>{totC.toLocaleString()}</td><td style={TD}></td><td style={{...TD,fontWeight:500,textAlign:"right"}}>{totP}</td><td style={{...TD,fontWeight:500,textAlign:"right"}}>{totW.toFixed(1)}</td><td style={{...TD,fontWeight:500,textAlign:"right"}}>{totCBM}</td><td colSpan={4} style={TD}></td></tr></tfoot>
             </table>
