@@ -155,32 +155,85 @@ export default function ShipmentApp() {
   const pltLabelRef=useRef<HTMLInputElement>(null)
   const metaJsonRef=useRef<HTMLInputElement>(null)
 
-  // ── 변동값 JSON 내보내기 (시트별) ──────────────────────────
+  // ── 변동값 JSON 내보내기 — 모든 시트 전체 포함 ──────────────
   function exportMetaJson() {
-    const sheetName = activeSheet || 'default'
-    const data = { sheetName, s2meta, ctnMeta, pltNotes, _v: 2, _date: new Date().toISOString() }
+    // localStorage에 저장된 모든 시트 키를 스캔해서 전부 백업
+    const allSheets: Record<string, {s2meta: unknown, ctnMeta: unknown, pltNotes: unknown}> = {}
+    // 현재 열린 시트 포함
+    const knownSheets = [...sheetNames, activeSheet].filter(Boolean) as string[]
+    for (const sn of [...new Set(knownSheets)]) {
+      // 현재 activeSheet는 state에서, 나머지는 localStorage에서
+      if (sn === activeSheet) {
+        allSheets[sn] = { s2meta, ctnMeta, pltNotes }
+      } else {
+        const sm = lsLoad(sheetKey(sn, "s2meta"), null)
+        const cm = lsLoad(sheetKey(sn, "ctnMeta"), null)
+        const pn = lsLoad(sheetKey(sn, "pltNotes"), null)
+        if (sm !== null || cm !== null || pn !== null) {
+          allSheets[sn] = { s2meta: sm || {}, ctnMeta: cm || {}, pltNotes: pn || {} }
+        }
+      }
+    }
+    const data = { sheets: allSheets, master, _v: 3, _date: new Date().toISOString() }
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
-    a.download = `meta_${sheetName}_${new Date().toISOString().slice(0,10)}.json`
+    a.download = `shipment_meta_${new Date().toISOString().slice(0,10)}.json`
     a.click()
   }
 
-  // ── 변동값 JSON 불러오기 ──────────────────────────────────
+  // ── 변동값 JSON 불러오기 — localStorage에 직접 쓰고 state도 갱신 ──
   function importMetaJson(file: File) {
     const rd = new FileReader()
     rd.onload = ev => {
       try {
         const d = JSON.parse(ev.target?.result as string)
-        if (d.s2meta) setS2meta(d.s2meta)
-        if (d.ctnMeta) setCtnMeta(d.ctnMeta)
-        if (d.pltNotes) setPltNotes(d.pltNotes)
-        if (d.master) setMaster(d.master)
-        alert(`복원 완료! [${d.sheetName||'?'}] SKU메타 ${Object.keys(d.s2meta||{}).length}개, 컨테이너 ${Object.keys(d.ctnMeta||{}).length}개`)
-      } catch { alert('JSON 파일이 올바르지 않습니다') }
+
+        // v3 형식: { sheets: { 시트명: { s2meta, ctnMeta, pltNotes } } }
+        if (d._v === 3 && d.sheets) {
+          let restoredCount = 0
+          for (const [sn, data] of Object.entries(d.sheets as Record<string, {s2meta: unknown, ctnMeta: unknown, pltNotes: unknown}>)) {
+            // localStorage에 직접 저장
+            lsSave(sheetKey(sn, "s2meta"), data.s2meta)
+            lsSave(sheetKey(sn, "ctnMeta"), data.ctnMeta)
+            lsSave(sheetKey(sn, "pltNotes"), data.pltNotes)
+            restoredCount++
+            // 현재 activeSheet라면 state도 즉시 갱신
+            if (sn === activeSheet) {
+              setS2meta(data.s2meta as Record<string,Record<string,string>>)
+              setCtnMeta(data.ctnMeta as Record<number,Record<string,string>>)
+              setPltNotes(data.pltNotes as Record<string,string>)
+            }
+          }
+          if (d.master) {
+            lsSave(LS_KEY+"_master", d.master)
+            setMaster(d.master)
+          }
+          alert(`복원 완료! ${restoredCount}개 시트 데이터 복원됨\n시트 탭을 클릭하면 해당 시트 데이터가 로드됩니다.`)
+
+        // v2 구버전 호환: { sheetName, s2meta, ctnMeta, pltNotes }
+        } else if (d.s2meta || d.ctnMeta) {
+          const sn = d.sheetName || activeSheet || 'default'
+          if (d.s2meta) lsSave(sheetKey(sn, "s2meta"), d.s2meta)
+          if (d.ctnMeta) lsSave(sheetKey(sn, "ctnMeta"), d.ctnMeta)
+          if (d.pltNotes) lsSave(sheetKey(sn, "pltNotes"), d.pltNotes)
+          if (sn === activeSheet) {
+            if (d.s2meta) setS2meta(d.s2meta)
+            if (d.ctnMeta) setCtnMeta(d.ctnMeta)
+            if (d.pltNotes) setPltNotes(d.pltNotes)
+          }
+          if (d.master) { lsSave(LS_KEY+"_master", d.master); setMaster(d.master) }
+          alert(`복원 완료 (구버전 형식)! [${sn}] SKU메타 ${Object.keys(d.s2meta||{}).length}개\n다른 시트는 수동으로 복원이 필요할 수 있습니다.`)
+        } else {
+          alert('알 수 없는 JSON 형식입니다')
+        }
+      } catch (e) { alert('JSON 파일 오류: ' + (e as Error).message) }
     }
     rd.readAsText(file)
   }
+
+  // 시트 변경 시 해당 시트의 저장 데이터 로드 (importMetaJson과 충돌 방지)
+  // → importMetaJson이 localStorage에 직접 쓰기 때문에 여기서 읽으면 올바른 값이 나옴
 
   const raw=(activeSheet&&sheets[activeSheet])||[]
   const {data:nd}=raw.length?normHeaders(raw):{data:[] as RowData[]}
