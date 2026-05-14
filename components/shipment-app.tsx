@@ -899,12 +899,6 @@ export default function ShipmentApp() {
               <span>+</span><span style={{color:file?"var(--color-text-primary)":"var(--color-text-tertiary)"}}>{file?file.name:"파일 업로드 (xlsx · csv)"}</span>
             </div>
             <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}} onChange={e=>e.target.files?.[0]&&loadFile(e.target.files[0])}/>
-            {/* 변동값 JSON 백업/복원 */}
-            <button onClick={exportMetaJson} style={{fontSize:11,padding:"3px 10px",cursor:"pointer",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",background:"transparent",color:"var(--color-text-secondary)"}}>⬇ 메타 JSON 백업</button>
-            <label style={{fontSize:11,padding:"3px 10px",cursor:"pointer",border:"0.5px solid var(--color-border-info)",borderRadius:"var(--border-radius-md)",background:"rgba(219,234,254,0.25)",color:"var(--color-text-info)"}}>
-              ⬆ 메타 JSON 복원
-              <input ref={metaJsonRef} type="file" accept=".json" style={{display:"none"}} onChange={e=>{const f=e.target.files?.[0];if(f){importMetaJson(f);e.target.value=""}}}/>
-            </label>
             {file&&<><span style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-tertiary)",color:"var(--color-text-secondary)"}}>{raw.length}행 · {ctnNums.length}컨 · {fd.reduce((s,r)=>s+r.quantity,0).toLocaleString()}개</span><button onClick={expS1} style={{fontSize:11,padding:"3px 10px"}}>xlsx 저장</button><button onClick={()=>setMode('2')} style={{marginLeft:"auto",fontSize:12,padding:"5px 14px",background:"var(--color-background-info)",border:"0.5px solid var(--color-border-info)",color:"var(--color-text-info)",borderRadius:"var(--border-radius-md)",cursor:"pointer",fontWeight:500}}>1차 가공으로 →</button></>}
           </div>
           <SheetTabs/>
@@ -931,6 +925,12 @@ export default function ShipmentApp() {
         <div>
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8,flexWrap:"wrap"}}>
             <span style={{fontSize:12,color:"var(--color-text-secondary)"}}>전체 합산 · <span style={{color:"var(--color-text-info)"}}>파란 셀</span> = 직접 입력</span>
+            {/* 변동값 JSON 백업/복원 */}
+            <button onClick={exportMetaJson} style={{fontSize:11,padding:"3px 10px",cursor:"pointer",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",background:"transparent",color:"var(--color-text-secondary)"}}>⬇ 메타 JSON 백업</button>
+            <label style={{fontSize:11,padding:"3px 10px",cursor:"pointer",border:"0.5px solid var(--color-border-info)",borderRadius:"var(--border-radius-md)",background:"rgba(219,234,254,0.25)",color:"var(--color-text-info)"}}>
+              ⬆ 메타 JSON 복원
+              <input ref={metaJsonRef} type="file" accept=".json" style={{display:"none"}} onChange={e=>{const f=e.target.files?.[0];if(f){importMetaJson(f);e.target.value=""}}}/>
+            </label>
             <button onClick={expS2} style={{marginLeft:"auto",fontSize:11,padding:"3px 10px"}}>xlsx 저장</button>
             <button onClick={expFbaUpload} disabled={fbaLoading} style={{fontSize:11,padding:"3px 10px",background:"var(--color-background-success)",border:"0.5px solid var(--color-border-success)",color:"var(--color-text-success)",borderRadius:"var(--border-radius-md)",cursor:fbaLoading?"default":"pointer",opacity:fbaLoading?0.6:1}}>{fbaLoading?"처리 중...":"FBA 업로드 양식"}</button>
             <button onClick={()=>setMode('3')} style={{fontSize:12,padding:"5px 14px",background:"var(--color-background-success)",border:"0.5px solid var(--color-border-success)",color:"var(--color-text-success)",borderRadius:"var(--border-radius-md)",cursor:"pointer",fontWeight:500}}>2차 가공으로 →</button>
