@@ -1035,8 +1035,10 @@ export default function ShipmentApp() {
         <div>
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14,flexWrap:"wrap"}}>
             <span style={{fontSize:12,color:"var(--color-text-secondary)"}}>카톤 + 파렛트 라벨 PDF → BOX CODE별 분류 · 표지 자동 삽입</span>
+            {activeSheet&&<span style={{fontSize:11,padding:"2px 8px",borderRadius:10,background:"rgba(219,234,254,0.4)",border:"0.5px solid var(--color-border-info)",color:"var(--color-text-info)"}}>현재 시트: {activeSheet}</span>}
             {Object.keys(labelGroups).length>0&&(<button onClick={dlAllLabels} style={{marginLeft:"auto",fontSize:11,padding:"3px 12px",background:"var(--color-background-success)",border:"0.5px solid var(--color-border-success)",color:"var(--color-text-success)",borderRadius:"var(--border-radius-md)",cursor:"pointer",fontWeight:500}}>전체 다운로드</button>)}
           </div>
+          <SheetTabs/>
 
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
             {/* 카톤 라벨 드롭존 */}
