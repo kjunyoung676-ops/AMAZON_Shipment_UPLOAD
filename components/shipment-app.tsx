@@ -46,8 +46,9 @@ const ALIASES: Record<string, string[]> = {
   eta:           ["도착(ETA)"],
   forwarding:    ["포워딩"],
   carrier:       ["선사"],
+  booking_ref:   ["부킹여부","부킹","Booking","booking"],
 }
-const FF_COLS = ["shipment_date","shipment_time","destination","etd","eta","qty_total","ctn_count","ft","sku","model_code","color"]
+const FF_COLS = ["shipment_date","shipment_time","destination","etd","eta","qty_total","ctn_count","ft","sku","model_code","color","booking_ref"]
 const CB = ["#dbeafe","#d1fae5","#fef3c7","#fce7f3","#ede9fe","#ffedd5","#e0f2fe","#dcfce7"]
 const CT = ["#1e40af","#065f46","#92400e","#9d174d","#4c1d95","#9a3412","#075985","#166534"]
 const TH: React.CSSProperties = {padding:"7px 10px",textAlign:"left",fontWeight:500,fontSize:11,color:"var(--color-text-primary)",borderBottom:"1.5px solid var(--color-border-secondary)",whiteSpace:"nowrap",background:"var(--color-background-secondary)",position:"sticky",top:0}
@@ -125,8 +126,9 @@ export default function ShipmentApp() {
   const [s2meta,setS2meta]=useState<Record<string,Record<string,string>>>({})
   const [ctnMeta,setCtnMeta]=useState<Record<number,Record<string,string>>>({})
   const [pltNotes,setPltNotes]=useState<Record<string,string>>({})
-
-  useEffect(()=>{lsSave(LS_KEY+"_master",master)},[master])
+  // BL별 입항지 선택: key=blId, value='kansai'|'kanto'
+  const [blPortMode,setBlPortMode]=useState<Record<string,string>>(()=>lsLoad(LS_KEY+"_blPortMode",{}))
+  useEffect(()=>{if(activeSheet)lsSave(sheetKey(activeSheet,"blPortMode"),blPortMode)},[blPortMode,activeSheet])
 
   // 시트 변경 시 해당 시트의 저장 데이터 로드
   useEffect(()=>{
@@ -134,6 +136,7 @@ export default function ShipmentApp() {
     setS2meta(lsLoad(sheetKey(activeSheet,"s2meta"),{}))
     setCtnMeta(lsLoad(sheetKey(activeSheet,"ctnMeta"),{}))
     setPltNotes(lsLoad(sheetKey(activeSheet,"pltNotes"),{}))
+    setBlPortMode(lsLoad(sheetKey(activeSheet,"blPortMode"),{}))
   },[activeSheet])
 
   useEffect(()=>{if(activeSheet)lsSave(sheetKey(activeSheet,"s2meta"),s2meta)},[s2meta,activeSheet])
@@ -967,7 +970,7 @@ export default function ShipmentApp() {
   const totC=s2rows.reduce((s,r)=>s+r.total,0),totP=s2rows.reduce((s,r)=>s+r.pallets,0),totW=s2rows.reduce((s,r)=>s+r.gw,0),totCBM=Math.round(s2rows.reduce((s,r)=>s+r.cbm,0)*100)/100
 
   function NavBtn({m,label}:{m:string,label:string}){
-    const active=mode===m,avail=m==='1'||m==='map'||m==='label'||m==='logistics'||!!file
+    const active=mode===m,avail=m==='1'||m==='map'||m==='label'||m==='logistics'||m==='s3b'||!!file
     return(<button onClick={()=>avail&&setMode(m)} style={{padding:"8px 16px",fontSize:12,fontWeight:active?500:400,cursor:avail?"pointer":"default",border:"none",background:active?"var(--color-text-primary)":"transparent",color:active?"var(--color-background-primary)":avail?"var(--color-text-secondary)":"var(--color-text-tertiary)"}}>{label}</button>)
   }
 
@@ -977,10 +980,11 @@ export default function ShipmentApp() {
       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:16}}>
         <div style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",overflow:"hidden",display:"flex"}}>
           <NavBtn m="1" label="1. 업로드"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
-          <NavBtn m="2" label="2. 1차 가공"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
+          <NavBtn m="2" label="2. 1차 가공 (준비)"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
           <NavBtn m="label" label="2. 라벨 분류"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
           <NavBtn m="logistics" label="2-5. 물류 전달"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
-          <NavBtn m="3" label="3. 2차 가공"/>
+          <NavBtn m="3" label="3. 2차 가공 (적재)"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
+          <NavBtn m="s3b" label="3. 3차 가공 (역산)"/>
         </div>
         <button onClick={()=>setMode('map')} style={{marginLeft:"auto",fontSize:11,padding:"6px 14px",background:mode==='map'?"var(--color-background-secondary)":"transparent",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",cursor:"pointer",color:mode==='map'?"var(--color-text-primary)":"var(--color-text-secondary)"}}>매핑 관리</button>
       </div>
@@ -1505,6 +1509,373 @@ ${ctnBlocks}
           )}
         </div>
       )}
+
+      {/* ══ 3차 가공 (역산시트) ══ */}
+      {mode==='s3b'&&(()=>{
+        // 부킹여부 컬럼으로 BL 구분
+        // 같은 booking_ref 값 → 같은 BL
+        // BL별로 약호+수량 합산 → 역산시트 행 생성
+
+        // BL 그룹핑
+        type BLRow = { no: number; blId: string; sku: string; asin: string; loc: string; qty: number; gw: number; price: number; fba: number }
+        const blGroups: Record<string, { rows: BLRow[]; blId: string }> = {}
+        let rowNo = 0
+
+        // fd에서 BL 기준으로 집계
+        const blAgg: Record<string, Record<string, { qty: number; blId: string }>> = {}
+        for (const r of fd) {
+          const sku = String(r.sku || '')
+          if (!sku) continue
+          const blId = String(r.booking_ref || r.destination || r.container_no || 'BL1')
+          if (!blAgg[blId]) blAgg[blId] = {}
+          if (!blAgg[blId][sku]) blAgg[blId][sku] = { qty: 0, blId }
+          blAgg[blId][sku].qty += r.quantity
+        }
+
+        // BL별 행 생성
+        const allBLRows: BLRow[] = []
+        let blNo = 1
+        for (const [blId, skuMap] of Object.entries(blAgg)) {
+          for (const [sku, { qty }] of Object.entries(skuMap)) {
+            const m = master[sku] || {} as MasterItem
+            rowNo++
+            allBLRows.push({
+              no: rowNo,
+              blId,
+              sku,
+              asin: m.asin || '',
+              loc: m.loc || '',
+              qty,
+              gw: calcGW(qty, parseFloat(String(m.kg)) || 0),
+              price: parseFloat(String(m.price)) || 0,
+              fba: parseFloat(String(m.fba)) || 0,
+            })
+          }
+          blNo++
+        }
+
+        // BL 목록
+        const blIds = [...new Set(fd.map(r => String(r.booking_ref || r.destination || r.container_no || 'BL1')))]
+
+        function expS3B() {
+          const hdr = [['NO','상품명(ASIN号)','ASIN No.','약호','신박스코드','UNIT(PCS)','G.W(KG)','판매가격(JPY)','FBA배송료(JPY)','BL']]
+          const body = allBLRows.map(r => [r.no, `${r.sku} ${r.asin}`, r.asin, r.sku, r.loc, r.qty, r.gw, r.price ? `¥${r.price.toLocaleString()}` : '', r.fba ? `¥${r.fba.toLocaleString()}` : '', r.blId])
+          xlsDl([...hdr, ...body], '역산시트', '역산시트_' + new Date().toISOString().slice(0,10) + '.xlsx')
+        }
+
+        // BL별 소계
+        const blTotals: Record<string, {qty:number, gw:number}> = {}
+        for (const r of allBLRows) {
+          if (!blTotals[r.blId]) blTotals[r.blId] = {qty:0, gw:0}
+          blTotals[r.blId].qty += r.qty
+          blTotals[r.blId].gw += r.gw
+        }
+
+        return (
+          <div>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14,flexWrap:"wrap"}}>
+              <span style={{fontSize:12,color:"var(--color-text-secondary)"}}>BL 기준 역산시트 · 부킹여부 컬럼으로 BL 구분</span>
+              {blIds.length > 0 && blIds.map((bid,i) => (
+                <span key={bid} style={{fontSize:11,padding:"2px 8px",borderRadius:10,background:CB[i%CB.length],color:CT[i%CT.length],border:"0.5px solid var(--color-border-tertiary)"}}>BL{i+1}: {bid}</span>
+              ))}
+              <button onClick={expS3B} style={{marginLeft:"auto",fontSize:11,padding:"3px 10px"}}>xlsx 저장</button>
+            </div>
+            <SheetTabs/>
+
+            {!file ? (
+              <p style={{color:"var(--color-text-tertiary)",fontSize:13,textAlign:"center",padding:"3rem 0"}}>파일을 먼저 업로드해주세요</p>
+            ) : allBLRows.length === 0 ? (
+              <div style={{textAlign:"center",padding:"3rem 0",color:"var(--color-text-tertiary)"}}>
+                <p>부킹여부 컬럼이 없거나 데이터가 없습니다.</p>
+                <p style={{fontSize:11,marginTop:8}}>업로드한 엑셀에 "부킹여부" 컬럼이 있어야 BL별로 구분됩니다.</p>
+              </div>
+            ) : (
+              <div style={{overflowX:"auto",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:900}}>
+                  <thead>
+                    <tr>
+                      <th style={{...TH,width:40}}>NO</th>
+                      <th style={{...TH,minWidth:200}}>Goods of Description<br/><span style={{fontWeight:400,fontSize:10,opacity:0.7}}>(일문상품명 ASIN号)</span></th>
+                      <th style={{...TH,minWidth:100}}>ASIN No.</th>
+                      <th style={{...TH,minWidth:130}}>약호</th>
+                      <th style={{...TH,minWidth:70}}>신박스코드</th>
+                      <th style={{...TH,textAlign:"right",minWidth:70}}>UNIT<br/><span style={{fontWeight:400,fontSize:10}}>(PCS)</span></th>
+                      <th style={{...TH,textAlign:"right",minWidth:90}}>G.W<br/><span style={{fontWeight:400,fontSize:10}}>(KG)</span></th>
+                      <th style={{...TH,textAlign:"right",minWidth:100}}>★販売単価<br/><span style={{fontWeight:400,fontSize:10}}>판매가격 (JPY)</span></th>
+                      <th style={{...TH,textAlign:"right",minWidth:110}}>②配送料 FBA<br/><span style={{fontWeight:400,fontSize:10}}>배송료 (JPY)</span></th>
+                      <th style={{...TH,minWidth:80}}>BL</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(() => {
+                      let lastBl = ''
+                      return allBLRows.map((r, i) => {
+                        const isNewBl = r.blId !== lastBl
+                        lastBl = r.blId
+                        const blIdx = blIds.indexOf(r.blId)
+                        const ci = blIdx % CB.length
+                        return (
+                          <>
+                            {isNewBl && (
+                              <tr key={`blheader_${r.blId}`} style={{background:CB[ci]}}>
+                                <td colSpan={10} style={{...TD,color:CT[ci],fontWeight:700,fontSize:12,padding:"6px 12px"}}>
+                                  BL{blIdx+1} — {r.blId}
+                                </td>
+                              </tr>
+                            )}
+                            <tr key={i} style={{background:i%2===0?"transparent":"var(--color-background-secondary)"}}>
+                              <td style={{...TD,textAlign:"center",color:"var(--color-text-tertiary)"}}>{r.no}</td>
+                              <td style={{...TD,fontSize:11}}>
+                                <div style={{fontWeight:500}}>{r.sku}</div>
+                                <div style={{fontSize:10,color:"var(--color-text-tertiary)",fontFamily:"var(--font-mono)"}}>{r.asin}</div>
+                              </td>
+                              <td style={{...TD,fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{r.asin}</td>
+                              <td style={{...TD,fontWeight:500}}>{r.sku}</td>
+                              <td style={{...TD,color:"var(--color-text-info)",fontWeight:500}}>{r.loc}</td>
+                              <td style={{...TD,textAlign:"right",fontWeight:500}}>{r.qty.toLocaleString()}</td>
+                              <td style={{...TD,textAlign:"right"}}>{r.gw.toFixed(1)}</td>
+                              <td style={{...TD,textAlign:"right",color:r.price>0?"var(--color-text-primary)":"var(--color-text-tertiary)"}}>
+                                {r.price > 0 ? `¥${r.price.toLocaleString()}` : '—'}
+                              </td>
+                              <td style={{...TD,textAlign:"right",color:r.fba>0?"var(--color-text-primary)":"var(--color-text-tertiary)"}}>
+                                {r.fba > 0 ? `¥${r.fba.toLocaleString()}` : '—'}
+                              </td>
+                              <td style={{...TD,fontSize:11,color:"var(--color-text-secondary)"}}>{r.blId}</td>
+                            </tr>
+                          </>
+                        )
+                      })
+                    })()}
+                    {/* BL별 소계 */}
+                    {blIds.map((blId, bi) => {
+                      const tot = blTotals[blId]
+                      if (!tot) return null
+                      const ci = bi % CB.length
+                      return (
+                        <tr key={`subtotal_${blId}`} style={{background:CB[ci],borderTop:"1.5px solid var(--color-border-secondary)"}}>
+                          <td colSpan={5} style={{...TD,color:CT[ci],fontWeight:600,textAlign:"right"}}>BL{bi+1} 소계</td>
+                          <td style={{...TD,color:CT[ci],fontWeight:700,textAlign:"right"}}>{tot.qty.toLocaleString()}</td>
+                          <td style={{...TD,color:CT[ci],fontWeight:700,textAlign:"right"}}>{tot.gw.toFixed(1)}</td>
+                          <td colSpan={3} style={TD}></td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                  <tfoot>
+                    <tr style={{background:"var(--color-background-secondary)",borderTop:"2px solid var(--color-border-secondary)"}}>
+                      <td colSpan={5} style={{...TD,fontWeight:500,textAlign:"right"}}>전체 합계</td>
+                      <td style={{...TD,fontWeight:500,textAlign:"right"}}>{allBLRows.reduce((s,r)=>s+r.qty,0).toLocaleString()}</td>
+                      <td style={{...TD,fontWeight:500,textAlign:"right"}}>{allBLRows.reduce((s,r)=>s+r.gw,0).toFixed(1)}</td>
+                      <td colSpan={3} style={TD}></td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            )}
+
+            {/* ── 비용 계산 (輸送費・通関諸費用) ── */}
+            {file && allBLRows.length > 0 && (()=>{
+              const fcPallets: Record<string, number> = {}
+              for (const r of s2rows) {
+                const fc = (s2meta[r.sku]||{}).fc || ''
+                if (!fc) continue
+                if (!fcPallets[fc]) fcPallets[fc] = 0
+                fcPallets[fc] += r.pallets
+              }
+              // FC센터 주소 기반 거리 분류
+              // 장거리(도쿄/요코하마 400km+): 10T만 사용
+              // 중거리(나고야 ~200km): 10T + 4T
+              // 단거리(오사카/고베 ~50km 이내): 10T + 4T + 2T
+              function getDistanceClass(fc: string, address: string): 'long' | 'mid' | 'short' {
+                const addr = (address || '').toUpperCase() + fc.toUpperCase()
+                // 도쿄권 (장거리)
+                if (/東京|TOKYO|神奈川|KANAGAWA|YOKOHAMA|横浜|埼玉|SAITAMA|千葉|CHIBA/.test(addr)) return 'long'
+                // 나고야권 (중거리)
+                if (/愛知|AICHI|NAGOYA|名古屋|三重|MIE|岐阜|GIFU/.test(addr)) return 'mid'
+                // 오사카/고베 (단거리)
+                if (/兵庫|HYOGO|神戸|KOBE|大阪|OSAKA|京都|KYOTO/.test(addr)) return 'short'
+                // FC코드로 fallback
+                if (['HIY1','TPB5'].includes(fc.toUpperCase())) return 'long'
+                if (['TPB8'].includes(fc.toUpperCase())) return 'mid'
+                if (['VJNB'].includes(fc.toUpperCase())) return 'short'
+                return 'long' // 기본값은 장거리 (안전하게)
+              }
+
+              function calcTrucks(pallets: number, distClass: 'long' | 'mid' | 'short') {
+                const t10 = Math.floor(pallets / 14)
+                const rem = pallets - t10 * 14
+                let t4 = 0, t2 = 0
+                if (rem > 0) {
+                  if (distClass === 'long') {
+                    // 장거리: 2T 없음, 나머지는 4T 또는 10T 추가
+                    if (rem <= 6) t4 = 1
+                    else { return { t10: t10 + 1, t4: 0, t2: 0 } }
+                  } else if (distClass === 'mid') {
+                    // 중거리: 4T까지 사용
+                    if (rem <= 6) t4 = 1
+                    else { return { t10: t10 + 1, t4: 0, t2: 0 } }
+                  } else {
+                    // 단거리: 2T도 사용 가능
+                    if (rem <= 2) t2 = 1
+                    else if (rem <= 6) t4 = 1
+                    else { return { t10: t10 + 1, t4: 0, t2: 0 } }
+                  }
+                }
+                return { t10, t4, t2 }
+              }
+              // ── 드레이지 단가: 관동/관서 구분 ──
+              // 관서: 오사카 남항 → CJ 오사카센터 → 40HQ ¥62,000
+              // 관동: 도쿄항 → CJ 사이타마센터 → 별도 견적 (일단 동일 기준 또는 요청)
+              const DRAY_KANSAI = 62000  // 관서 40HQ/본
+              const DRAY_KANTO  = 62000  // 관동 40HQ/본 (확인 필요 — 동일 가정)
+              const TAX = 1.1
+              const INOUT = 500
+
+              // BL별 입항지 자동 추정 (FC주소 기반) + 수동 override
+              // FC가 관동권(도쿄/요코하마/사이타마)이면 관동, 관서권이면 관서
+              function guessPort(blId: string): 'kansai' | 'kanto' {
+                const blRows = allBLRows.filter(r => r.blId === blId)
+                for (const r of blRows) {
+                  const fc = r.sku ? (s2meta[r.sku]||{}).fc || '' : ''
+                  const addr = (s2meta[r.sku]||{}).address || ''
+                  const combined = (addr + fc).toUpperCase()
+                  if (/東京|TOKYO|神奈川|KANAGAWA|YOKOHAMA|横浜|埼玉|SAITAMA|千葉|CHIBA/.test(combined)) return 'kanto'
+                  if (/兵庫|HYOGO|神戸|KOBE|大阪|OSAKA|愛知|AICHI/.test(combined)) return 'kansai'
+                  if (['HIY1','TPB5'].includes(fc)) return 'kanto'
+                }
+                return 'kansai' // 기본값
+              }
+
+              // 컨테이너 타입별 드레이지: 이번 건은 40HQ 기준
+              // BL별로 컨테이너 수 집계
+              const blCtnCount: Record<string, number> = {}
+              for (const [blId] of Object.entries(blAgg)) {
+                // 컨테이너 중 해당 BL 소속인 것 세기
+                // fd에서 booking_ref가 blId인 row의 container_no 고유값 카운트
+                const blCtnNos = new Set(fd.filter(r=>String(r.booking_ref||r.destination||r.container_no||'BL1')===blId).map(r=>r.container_no))
+                blCtnCount[blId] = blCtnNos.size || 1
+              }
+
+              // BL별 FC 파렛트 집계
+              const blFcPallets: Record<string, Record<string,number>> = {}
+              for (const r of allBLRows) {
+                if (!blFcPallets[r.blId]) blFcPallets[r.blId] = {}
+                const fc = (s2meta[r.sku]||{}).fc || '?'
+                if (!blFcPallets[r.blId][fc]) blFcPallets[r.blId][fc] = 0
+                blFcPallets[r.blId][fc] += r.pallets
+              }
+
+              type CR = {item:string;qty:number;unit:string;up:number;sub:number;taxed:boolean;total:number;note?:string}
+
+              // BL별 비용 계산
+              const blCostSections: {blId:string; blNo:number; port:'kansai'|'kanto'; rows:CR[]; subtotal:number}[] = []
+
+              blIds.forEach((blId, bi) => {
+                const port = (blPortMode[blId] as 'kansai'|'kanto') || guessPort(blId)
+                const ctnCnt = blCtnCount[blId] || 1
+                const drayRate = port === 'kansai' ? DRAY_KANSAI : DRAY_KANTO
+                const portLabel = port === 'kansai' ? '관서 (오사카 남항)' : '관동 (도쿄항)'
+                const fcPlt = blFcPallets[blId] || {}
+                const blTotalPlts = Object.values(fcPlt).reduce((s,v)=>s+v,0)
+
+                const rows: CR[] = [
+                  {item:'通関申告料（1申告/2HS）통관신고료', qty:1,unit:'件',up:11800,sub:11800,taxed:false,total:11800},
+                  {item:'輸入取扱料 수입취급료', qty:1,unit:'件',up:10000,sub:10000,taxed:true,total:Math.round(10000*TAX)},
+                  {item:'評価申告料（1申告/2HS）평가신고료', qty:1,unit:'件',up:11800,sub:11800,taxed:false,total:11800},
+                  {item:'AN費用 AN비용', qty:1,unit:'件',up:0,sub:0,taxed:false,total:0,note:'견적'},
+                  {item:`40Fドレー+デバン費用 ${portLabel} (${ctnCnt}본)`, qty:ctnCnt,unit:'本',up:drayRate,sub:ctnCnt*drayRate,taxed:true,total:Math.round(ctnCnt*drayRate*TAX)},
+                ]
+
+                for (const [fc, plts] of Object.entries(fcPlt)) {
+                  const addr = (s2meta[Object.keys(s2meta).find(k=>(s2meta[k]?.fc||'')===fc)||'']||{}).address || ''
+                  const distClass = getDistanceClass(fc, addr)
+                  const tr = calcTrucks(plts, distClass)
+                  const RATES: Record<string,{t10:number,t4:number,t2:number}> = {
+                    HIY1:{t10:55000,t4:35000,t2:25000}, TPB5:{t10:55000,t4:45000,t2:25000},
+                    VJNB:{t10:55000,t4:45000,t2:25000}, TPB8:{t10:55000,t4:45000,t2:25000},
+                  }
+                  const r = RATES[fc]||{t10:55000,t4:45000,t2:25000}
+                  if (tr.t10>0){const s=tr.t10*r.t10;rows.push({item:`配送料金 (${fc}) 10T × ${tr.t10}台`,qty:tr.t10,unit:'本',up:r.t10,sub:s,taxed:true,total:Math.round(s*TAX)})}
+                  if (tr.t4>0){const s=tr.t4*r.t4;rows.push({item:`配送料金 (${fc}) 4T × ${tr.t4}台`,qty:tr.t4,unit:'本',up:r.t4,sub:s,taxed:true,total:Math.round(s*TAX)})}
+                  if (tr.t2>0){const s=tr.t2*r.t2;rows.push({item:`配送料金 (${fc}) 2T × ${tr.t2}台`,qty:tr.t2,unit:'本',up:r.t2,sub:s,taxed:true,total:Math.round(s*TAX)})}
+                }
+                rows.push({item:`入庫料 입고료 (${blTotalPlts}PLT)`,qty:blTotalPlts,unit:'PLT',up:INOUT,sub:blTotalPlts*INOUT,taxed:true,total:Math.round(blTotalPlts*INOUT*TAX)})
+                rows.push({item:`出荷料 출고료 (${blTotalPlts}PLT)`,qty:blTotalPlts,unit:'PLT',up:INOUT,sub:blTotalPlts*INOUT,taxed:true,total:Math.round(blTotalPlts*INOUT*TAX)})
+                const subtotal = rows.reduce((s,r)=>s+r.total,0)
+                blCostSections.push({blId, blNo:bi+1, port, rows, subtotal})
+              })
+
+              const grandTotal = blCostSections.reduce((s,b)=>s+b.subtotal,0)
+
+              return (
+                <div style={{marginTop:20}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+                    <span style={{fontWeight:700,fontSize:13,color:"var(--color-text-primary)"}}>輸送費・輸入通関諸費用 (BL별)</span>
+                    <span style={{fontSize:11,color:"var(--color-text-tertiary)"}}>※ 입항지 자동 감지 · 수동 변경 가능</span>
+                  </div>
+                  {blCostSections.map((bl, si) => {
+                    const ci = si % CB.length
+                    return (
+                      <div key={bl.blId} style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",overflow:"hidden",marginBottom:12}}>
+                        {/* BL 헤더 */}
+                        <div style={{background:"#1e293b",color:"#fff",padding:"8px 14px",display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                          <span style={{fontWeight:700,fontSize:13}}>BL{bl.blNo} — {bl.blId}</span>
+                          {/* 입항지 선택 */}
+                          <div style={{display:"flex",alignItems:"center",gap:6,marginLeft:8,background:"rgba(255,255,255,0.12)",borderRadius:6,padding:"2px 4px"}}>
+                            <span style={{fontSize:11,opacity:0.8}}>입항지:</span>
+                            {(['kansai','kanto'] as const).map(p=>(
+                              <button key={p} onClick={()=>setBlPortMode(prev=>({...prev,[bl.blId]:p}))} style={{fontSize:11,padding:"2px 10px",borderRadius:4,border:"none",cursor:"pointer",fontWeight:bl.port===p?700:400,background:bl.port===p?(p==='kansai'?'#3b82f6':'#10b981'):'rgba(255,255,255,0.2)',color:"#fff"}}>
+                                {p==='kansai'?'관서 (오사카)':'관동 (도쿄)'}
+                              </button>
+                            ))}
+                          </div>
+                          {/* FC별 파렛트 요약 */}
+                          {Object.entries(blFcPallets[bl.blId]||{}).map(([fc,plt])=>{
+                            const addr=(s2meta[Object.keys(s2meta).find(k=>(s2meta[k]?.fc||'')===fc)||'']||{}).address||''
+                            const dc=getDistanceClass(fc,addr)
+                            const tr=calcTrucks(plt,dc)
+                            return<span key={fc} style={{fontSize:10,padding:"1px 6px",borderRadius:8,background:"rgba(255,255,255,0.15)"}}>{fc}: {plt}PLT→{tr.t10>0?`10T×${tr.t10}`:''}{tr.t4>0?` 4T×${tr.t4}`:''}{tr.t2>0?` 2T×${tr.t2}`:''}</span>
+                          })}
+                          <span style={{marginLeft:"auto",fontWeight:700,color:"#fbbf24"}}>¥{bl.subtotal.toLocaleString()}</span>
+                        </div>
+                        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                          <thead><tr>{['項目 항목','件 건','単位','単価','金額','税','TOTAL金額'].map(h=><th key={h} style={{...TH,textAlign:['件 건','単価','金額','TOTAL金額'].includes(h)?'right':'left'}}>{h}</th>)}</tr></thead>
+                          <tbody>{bl.rows.map((r,i)=>(
+                            <tr key={i} style={{background:i%2===0?"transparent":"var(--color-background-secondary)"}}>
+                              <td style={{...TD,minWidth:300}}>{r.item}</td>
+                              <td style={{...TD,textAlign:"right"}}>{r.qty}</td>
+                              <td style={TD}>{r.unit}</td>
+                              <td style={{...TD,textAlign:"right"}}>{r.up>0?`¥${r.up.toLocaleString()}`:'—'}</td>
+                              <td style={{...TD,textAlign:"right"}}>{r.sub>0?`¥${r.sub.toLocaleString()}`:'—'}</td>
+                              <td style={{...TD,fontSize:10,color:r.taxed?"#ef4444":"var(--color-text-tertiary)"}}>{r.taxed?'課税 10%':'免税'}</td>
+                              <td style={{...TD,textAlign:"right",fontWeight:500}}>
+                                {r.note==='견적'?<span style={{color:"var(--color-text-tertiary)"}}>견적</span>:r.total>0?`¥${r.total.toLocaleString()}`:'—'}
+                              </td>
+                            </tr>
+                          ))}</tbody>
+                          <tfoot><tr style={{background:CB[ci]}}>
+                            <td colSpan={5} style={{...TD,color:CT[ci],fontWeight:600,textAlign:"right"}}>BL{bl.blNo} 소계</td>
+                            <td style={TD}></td>
+                            <td style={{...TD,color:CT[ci],fontWeight:700,fontSize:13,textAlign:"right"}}>¥{bl.subtotal.toLocaleString()}</td>
+                          </tr></tfoot>
+                        </table>
+                      </div>
+                    )
+                  })}
+                  {/* 전체 합계 */}
+                  <div style={{background:"#1e293b",color:"#fff",padding:"10px 16px",borderRadius:"var(--border-radius-md)",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <span style={{fontWeight:600}}>전체 합계 ({blIds.length}BL)</span>
+                    <span style={{fontWeight:800,fontSize:16,color:"#fbbf24"}}>¥{grandTotal.toLocaleString()}</span>
+                  </div>
+                  <div style={{marginTop:6,fontSize:10,color:"var(--color-text-tertiary)"}}>
+                    ※ 입출고료 각 ¥500/PLT · 트럭: 10T=14PLT, 4T=6PLT(장거리2T불가), 2T=2PLT(오사카권만) · AN費用·실제 배송단가는 견적서 확인 후 수정
+                  </div>
+                </div>
+              )
+            })()}
+          </div>
+        )
+      })()}
 
       {/* ══ 매핑 관리 ══ */}
       {mode==='map'&&(
