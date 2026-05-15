@@ -1705,14 +1705,23 @@ ${ctnBlocks}
                 blCtnCount[blId] = Math.max(nos.size,1)
               }
 
-              function getDistanceClass(fc: string, address: string): 'long'|'mid'|'short' {
+              // 거리 분류: 관서(오사카 출발) vs 관동(사이타마 출발) 기준이 다름
+              // 관서 기준: 도쿄/요코하마=장거리, 나고야=중거리, 고베=단거리
+              // 관동 기준: 도쿄/요코하마=단거리, 나고야=중장거리, 고베=장거리
+              function getDistanceClass(fc: string, address: string, port: 'kansai'|'kanto'): 'long'|'mid'|'short' {
                 const a = (address||'').toUpperCase()+fc.toUpperCase()
-                if (/東京|TOKYO|神奈川|KANAGAWA|YOKOHAMA|横浜|埼玉|SAITAMA|千葉|CHIBA/.test(a)) return 'long'
-                if (/愛知|AICHI|NAGOYA|名古屋|三重|岐阜/.test(a)) return 'mid'
-                if (/兵庫|HYOGO|神戸|KOBE|大阪|OSAKA|京都/.test(a)) return 'short'
-                if (['HIY1','TPB5'].includes(fc)) return 'long'
-                if (['TPB8'].includes(fc)) return 'mid'
-                if (['VJNB'].includes(fc)) return 'short'
+                const isTokyoArea = /東京|TOKYO|神奈川|KANAGAWA|YOKOHAMA|横浜|埼玉|SAITAMA|千葉|CHIBA/.test(a) || ['HIY1','TPB5'].includes(fc)
+                const isNagoyaArea = /愛知|AICHI|NAGOYA|名古屋|三重|岐阜/.test(a) || ['TPB8'].includes(fc)
+                const isOsakaArea = /兵庫|HYOGO|神戸|KOBE|大阪|OSAKA|京都/.test(a) || ['VJNB'].includes(fc)
+                if (port === 'kansai') {
+                  if (isTokyoArea) return 'long'
+                  if (isNagoyaArea) return 'mid'
+                  if (isOsakaArea) return 'short'
+                } else { // kanto (사이타마 출발)
+                  if (isTokyoArea) return 'short'   // 사이타마→요코하마/도쿄 단거리
+                  if (isNagoyaArea) return 'mid'    // 사이타마→나고야 중장거리
+                  if (isOsakaArea) return 'long'    // 사이타마→고베 장거리
+                }
                 return 'long'
               }
 
@@ -1736,7 +1745,9 @@ ${ctnBlocks}
                 return 'kansai'
               }
 
-              const DRAY_KANSAI=62000, DRAY_KANTO=0, TAX=1.1, INOUT=500
+              const DRAY_KANSAI=62000, DRAY_KANTO=62000, TAX=1.1, INOUT=500
+              // 배송 단가 — 관서/관동 공통 (출발지만 다름, 단가는 요청 기준 동일 가정)
+              // 실제 관동 단가는 CJ 견적서 확인 후 수정
               const RATES: Record<string,{t10:number,t4:number,t2:number}> = {
                 HIY1:{t10:55000,t4:35000,t2:25000},
                 TPB5:{t10:55000,t4:45000,t2:25000},
@@ -1768,7 +1779,7 @@ ${ctnBlocks}
 
                 for (const [fc,plts] of Object.entries(fcPlt)) {
                   if (!plts) continue
-                  const dc=getDistanceClass(fc,fcAddr[fc]||'')
+                  const dc=getDistanceClass(fc,fcAddr[fc]||'',port)
                   const tr=calcTrucks(plts,dc)
                   const r=RATES[fc]||{t10:55000,t4:45000,t2:25000}
                   if(tr.t10>0){const s=tr.t10*r.t10;rows.push({item:`配送料金 (${fc}) 10T × ${tr.t10}台`,ko:`배송료 (${fc}) 10톤 × ${tr.t10}대`,qty:tr.t10,unit:'本',up:r.t10,sub:s,taxed:true,total:Math.round(s*TAX)})}
@@ -1809,7 +1820,7 @@ ${ctnBlocks}
                           </div>
                           {Object.entries(blFcPallets[bl.blId]||{}).map(([fc,plt])=>{
                             if(!plt) return null
-                            const tr=calcTrucks(plt,getDistanceClass(fc,fcAddr[fc]||''))
+                            const tr=calcTrucks(plt,getDistanceClass(fc,fcAddr[fc]||'',bl.port))
                             return <span key={fc} style={{fontSize:10,padding:"1px 7px",borderRadius:8,background:"rgba(255,255,255,0.15)"}}>{fc}: {plt}PLT→{tr.t10>0?`10T×${tr.t10}`:''}{tr.t4>0?` 4T×${tr.t4}`:''}{tr.t2>0?` 2T×${tr.t2}`:''}</span>
                           })}
                           <span style={{marginLeft:"auto",fontWeight:700,color:"#fbbf24"}}>¥{bl.sub.toLocaleString()}</span>
@@ -1854,7 +1865,7 @@ ${ctnBlocks}
                     <span style={{fontWeight:800,fontSize:16,color:"#fbbf24"}}>¥{grand.toLocaleString()}</span>
                   </div>
                   <div style={{marginTop:6,fontSize:10,color:"var(--color-text-tertiary)"}}>
-                    ※ 입출고료 각 ¥500/PLT · 관동 드레이지 단가 미정(견적요청) · 트럭: 10T=14PLT, 4T=6PLT, 2T=2PLT(오사카권만)
+                    ※ 입출고료 각 ¥500/PLT · 드레이지: 관서 ¥62,000/본, 관동 ¥62,000/본 (미확정) · 트럭: 관서기준 도쿄=장거리/고베=단거리, 관동기준 도쿄=단거리/고베=장거리 · 실제 단가는 견적서 확인 후 수정
                   </div>
                 </div>
               )
