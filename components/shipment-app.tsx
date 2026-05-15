@@ -902,13 +902,14 @@ export default function ShipmentApp() {
   }
   function dlLabel(loc: string, bytes: Uint8Array) {
     const isPlt = loc.startsWith('__PLT__')
+    const ts = new Date().toISOString().slice(0,16).replace('T','_').replace(':','')
     let filename: string
     if (isPlt) {
-      filename = loc.replace('__PLT__', '') + '.pdf'
+      filename = loc.replace('__PLT__', '') + `_${ts}.pdf`
     } else {
       const realSku = locToRealSku(loc)
       const sku = locToSku(loc)
-      filename = `${loc} (${realSku||sku||loc}).pdf`
+      filename = `${loc} (${realSku||sku||loc})_${ts}.pdf`
     }
     const a = document.createElement('a')
     a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }))
@@ -916,10 +917,9 @@ export default function ShipmentApp() {
     a.click()
   }
   function dlAllLabels(){
-    // 동시 다운로드 시 브라우저가 (1)(2)를 붙이는 걸 방지 — 순차적으로 딜레이
     const entries = Object.entries(labelGroups)
     entries.forEach(([l,b], i) => {
-      setTimeout(() => dlLabel(l, b), i * 300)
+      setTimeout(() => dlLabel(l, b), i * 400)
     })
   }
 
