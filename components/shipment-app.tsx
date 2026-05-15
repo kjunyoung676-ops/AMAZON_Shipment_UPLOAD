@@ -915,7 +915,13 @@ export default function ShipmentApp() {
     a.download = filename
     a.click()
   }
-  function dlAllLabels(){Object.entries(labelGroups).forEach(([l,b])=>dlLabel(l,b))}
+  function dlAllLabels(){
+    // 동시 다운로드 시 브라우저가 (1)(2)를 붙이는 걸 방지 — 순차적으로 딜레이
+    const entries = Object.entries(labelGroups)
+    entries.forEach(([l,b], i) => {
+      setTimeout(() => dlLabel(l, b), i * 300)
+    })
+  }
 
   function SheetTabs(){
     if(!sheetNames.length)return null
