@@ -402,7 +402,6 @@ export default function ShipmentApp() {
           if (fbaMatch && !detectedFbaId) detectedFbaId = fbaMatch[0]
           const pltMatch = pageText.match(/#[：:]\s*(\d+)\s*\/\s*(\d+)/)
           if (pltMatch) { const total = parseInt(pltMatch[2]); if (total > maxPlt) maxPlt = total }
-          if (!detectedFbaId) { const fnMatch = f.name.match(/^(FBA[A-Z0-9]+)/); if (fnMatch) detectedFbaId = fnMatch[1] }
           // FC센터 추출: 납품선 코드는 보통 3~5자 대문자 (HIY1, TPB5, VJNB 등)
           // 파렛트 라벨에서 "納品先:\nXXXX\n" 또는 "FBA STA (...)-XXXX" 패턴
           if (!detectedFc) {
@@ -424,17 +423,49 @@ export default function ShipmentApp() {
         }
         pdf2.destroy()
 
+        // 파일명에서 FBA ID + 파렛트 수 추출 (텍스트 추출 실패 시 fallback)
+        if (!detectedFbaId) {
+          const fnMatch = f.name.match(/^(FBA[A-Z0-9]+)/)
+          if (fnMatch) detectedFbaId = fnMatch[1]
+        }
+        // 파일명에서 파렛트 수 추출: "1~18", "1~142" 패턴
+        if (maxPlt === 0) {
+          const pltNumMatch = f.name.match(/1[~\-](\d+)/)
+          if (pltNumMatch) maxPlt = parseInt(pltNumMatch[1])
+        }
+        // 파일명에서 FC센터 추출 (앞부분 알파벳+숫자 코드)
+        if (!detectedFc) {
+          const fcMatch = f.name.match(/^([A-Z]{3,5}\d?)_/)
+          if (fcMatch && !['FBA'].includes(fcMatch[1])) detectedFc = fcMatch[1]
+        }
+
         if (detectedFbaId && maxPlt > 0) {
           const pltRange = `1~${maxPlt}`
           const pltLabel = `${detectedFc ? detectedFc+'_' : ''}${detectedFbaId}_${pltRange}`
+
+          // FBA ID 매칭: 여러 전략으로 시도
+          // s2meta.fbaId 예시: "FBA15G97HNPC", "FBA15G97HNPCU000001" 등
+          // detectedFbaId 예시: "FBA15G97HNPC", "FBA15G97HNPCU000001" 등
+          const detectedBase = detectedFbaId.replace(/U\d+$/, '').toUpperCase()
+
           for (const [sku, meta] of Object.entries(s2meta)) {
-            const metaFbaId = meta.fbaId?.replace(/U\d+$/, '').toUpperCase()
-            const targetPrefix = detectedFbaId.replace(/U\d+$/, '').toUpperCase()
-            if (metaFbaId && metaFbaId === targetPrefix) {
+            const rawFbaId = meta.fbaId?.trim() || ''
+            if (!rawFbaId) continue
+            const metaBase = rawFbaId.replace(/U\d+$/, '').toUpperCase()
+
+            const matched =
+              metaBase === detectedBase ||                          // 정확히 일치
+              rawFbaId.toUpperCase().startsWith(detectedBase) ||   // 저장된게 더 길 경우
+              detectedBase.startsWith(metaBase) ||                 // PDF에서 읽힌게 더 길 경우
+              metaBase.includes(detectedBase) ||
+              detectedBase.includes(metaBase)
+
+            if (matched) {
               const ctnNums2 = [...new Set(fd.map(r=>r.container_no as number))]
               for (const no of ctnNums2) { newPltNotes[`${no}_${sku}`] = pltRange }
             }
           }
+
           const pltKey = `__PLT__${pltLabel}`
           const pltDoc = await PDFDocument.create()
           await makePalletCoverPage(pltDoc, detectedFbaId, detectedFc, `Pallet ${pltRange}`)
@@ -444,12 +475,16 @@ export default function ShipmentApp() {
           await makePalletCoverPage(pltDoc, detectedFbaId, detectedFc, `Pallet ${pltRange}`)
           newGroups[pltKey] = await pltDoc.save()
           newCounts[pltKey] = maxPlt
+        } else {
+          // 매칭 실패 시 상태 메시지
+          setLabelStatus(`파렛트 감지 실패: FBA ID="${detectedFbaId}" 파렛트수=${maxPlt} — 파일명: ${f.name}`)
         }
       }
+      const matchedCount = Object.keys(newPltNotes).length - Object.keys(pltNotes).length
       setPltNotes(newPltNotes)
       setLabelGroups(newGroups)
       setLabelCounts(newCounts)
-      setLabelStatus(`파렛트 ${pltFiles.length}개 처리 완료 — 2-5. 물류 전달에 파렛트 번호 자동 반영됨`)
+      setLabelStatus(`파렛트 ${pltFiles.length}개 처리 완료 — ${matchedCount > 0 ? matchedCount+'개 SKU 파렛트 번호 반영됨' : '⚠️ 매칭된 SKU 없음 (1차 가공에서 FBA ID 입력 확인)'}`)
     } catch(e) {
       alert('파렛트 처리 오류: ' + (e as Error).message)
       setLabelStatus("")
