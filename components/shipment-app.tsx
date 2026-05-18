@@ -1159,21 +1159,56 @@ export default function ShipmentApp() {
                   <thead><tr>
                     <th style={TH}>FC센터 / FBA ID</th>
                     <th style={{...TH,textAlign:"right"}}>파렛트 수</th>
+                    <th style={{...TH,textAlign:"right"}}>A4용지 (6개/장)</th>
                     <th style={{...TH,textAlign:"right"}}>파일 크기</th>
                     <th style={TH}></th>
                   </tr></thead>
                   <tbody>{Object.entries(labelGroups).filter(([k])=>k.startsWith('__PLT__')).map(([loc,bytes],i)=>{
                     const displayKey = loc.replace('__PLT__','')
                     const cnt = labelCounts[loc]||0
+                    const sheets = Math.ceil(cnt/6)
                     return(<tr key={loc} style={{background:i%2===0?"rgba(219,234,254,0.08)":"rgba(219,234,254,0.2)"}}>
                       <td style={{...TD,fontWeight:500,color:"var(--color-text-info)"}}>{displayKey}</td>
                       <td style={{...TD,textAlign:"right",fontWeight:600}}>{cnt}파렛트</td>
+                      <td style={{...TD,textAlign:"right",fontWeight:700,color:"#dc2626"}}>{sheets}장</td>
                       <td style={{...TD,textAlign:"right",color:"var(--color-text-secondary)"}}>{(bytes.length/1024).toFixed(0)}KB</td>
                       <td style={TD}><button onClick={()=>dlLabel(loc,bytes)} style={{fontSize:11,padding:"2px 10px",cursor:"pointer",borderRadius:4,border:"0.5px solid var(--color-border-info)",background:"transparent"}}>↓ PDF</button></td>
                     </tr>)
                   })}</tbody>
+                  <tfoot><tr style={{background:"rgba(219,234,254,0.3)",borderTop:"1.5px solid var(--color-border-info)"}}>
+                    <td style={{...TD,fontWeight:500,color:"var(--color-text-info)"}}>파렛트 합계</td>
+                    <td style={{...TD,textAlign:"right",fontWeight:500}}>{Object.entries(labelCounts).filter(([k])=>k.startsWith('__PLT__')).reduce((s,[,c])=>s+c,0)}파렛트</td>
+                    <td style={{...TD,textAlign:"right",fontWeight:700,color:"#dc2626"}}>{Math.ceil(Object.entries(labelCounts).filter(([k])=>k.startsWith('__PLT__')).reduce((s,[,c])=>s+c,0)/6)}장 필요</td>
+                    <td style={{...TD,textAlign:"right",fontWeight:500}}>{(Object.entries(labelGroups).filter(([k])=>k.startsWith('__PLT__')).reduce((s,[,b])=>s+b.length,0)/1024).toFixed(0)}KB</td>
+                    <td style={TD}></td>
+                  </tr></tfoot>
                 </table>
               </div>
+            </div>
+          )}
+
+          {/* 전체 라벨 리스트 xlsx 저장 */}
+          {(Object.keys(labelGroups).filter(k=>!k.startsWith('__PLT__')).length>0||Object.keys(labelGroups).filter(k=>k.startsWith('__PLT__')).length>0)&&!labelLoading&&(
+            <div style={{marginBottom:12,display:"flex",justifyContent:"flex-end"}}>
+              <button onClick={()=>{
+                const hdr=[['구분','BOX CODE / FBA ID','realSku / FC센터','라벨수','A4용지(6개/장)','파일크기(KB)']]
+                const cartonRows = Object.entries(labelCounts).filter(([k])=>!k.startsWith('__PLT__')).sort(([a],[b])=>a.localeCompare(b)).map(([loc,cnt])=>{
+                  const realSku=locToRealSku(loc)||locToSku(loc)||''
+                  return ['카톤라벨', loc, realSku, cnt, Math.ceil(cnt/6), ((labelGroups[loc]?.length||0)/1024).toFixed(0)]
+                })
+                const pltRows = Object.entries(labelCounts).filter(([k])=>k.startsWith('__PLT__')).map(([loc,cnt])=>{
+                  const key=loc.replace('__PLT__','')
+                  return ['파렛트라벨', key, key, cnt, Math.ceil(cnt/6), ((labelGroups[loc]?.length||0)/1024).toFixed(0)]
+                })
+                const totalCarton=Object.entries(labelCounts).filter(([k])=>!k.startsWith('__PLT__')).reduce((s,[,c])=>s+c,0)
+                const totalPlt=Object.entries(labelCounts).filter(([k])=>k.startsWith('__PLT__')).reduce((s,[,c])=>s+c,0)
+                const totalRow=[['합계','','',totalCarton+totalPlt,Math.ceil(totalCarton/6)+Math.ceil(totalPlt/6),''],
+                  ['카톤합계','','',totalCarton,Math.ceil(totalCarton/6),''],
+                  ['파렛트합계','','',totalPlt,Math.ceil(totalPlt/6),'']]
+                xlsDl([...hdr,...cartonRows,...pltRows,...totalRow],'라벨리스트','라벨리스트_'+new Date().toISOString().slice(0,10)+'.xlsx')
+              }} style={{fontSize:11,padding:"5px 14px",cursor:"pointer",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",background:"var(--color-background-secondary)",color:"var(--color-text-primary)",fontWeight:500}}>
+                📊 전체 라벨 리스트 xlsx 저장
+              </button>
             </div>
           )}
 
