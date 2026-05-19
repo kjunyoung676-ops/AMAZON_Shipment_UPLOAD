@@ -1567,21 +1567,26 @@ ${ctnBlocks}
         let rowNo = 0
 
         // fd에서 BL 기준으로 집계
-        const blAgg: Record<string, Record<string, { qty: number; blId: string }>> = {}
+        const blAgg: Record<string, Record<string, { qty: number; blId: string; gw: number; pallets: number }>> = {}
         for (const r of fd) {
           const sku = String(r.sku || '')
           if (!sku) continue
           const blId = String(r.booking_ref || r.destination || r.container_no || 'BL1')
           if (!blAgg[blId]) blAgg[blId] = {}
-          if (!blAgg[blId][sku]) blAgg[blId][sku] = { qty: 0, blId }
+          if (!blAgg[blId][sku]) blAgg[blId][sku] = { qty: 0, blId, gw: 0, pallets: 0 }
+          const m = master[sku] || {} as MasterItem
+          const cpp = parseFloat(String(m.cpp)) || 16
           blAgg[blId][sku].qty += r.quantity
+          // 행별 calcGW 누적 (합산 후 calcGW 금지)
+          blAgg[blId][sku].gw += calcGW(r.quantity, parseFloat(String(m.kg)) || 0)
+          blAgg[blId][sku].pallets += Math.ceil(r.quantity / cpp)
         }
 
         // BL별 행 생성
         const allBLRows: BLRow[] = []
         let blNo = 1
         for (const [blId, skuMap] of Object.entries(blAgg)) {
-          for (const [sku, { qty }] of Object.entries(skuMap)) {
+          for (const [sku, { qty, gw, pallets }] of Object.entries(skuMap)) {
             const m = master[sku] || {} as MasterItem
             rowNo++
             allBLRows.push({
@@ -1591,7 +1596,7 @@ ${ctnBlocks}
               asin: m.asin || '',
               loc: m.loc || '',
               qty,
-              gw: calcGW(qty, parseFloat(String(m.kg)) || 0),
+              gw: Math.round(gw * 10) / 10,
               price: parseFloat(String(m.price)) || 0,
               fba: parseFloat(String(m.fba)) || 0,
             })
