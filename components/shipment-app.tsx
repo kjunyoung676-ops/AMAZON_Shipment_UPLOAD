@@ -246,10 +246,20 @@ export default function ShipmentApp() {
   function loadFile(f:File){setFile(f);const rd=new FileReader();rd.onload=e=>{const wb=XLSX.read((e.target as FileReader).result,{type:'array'});const ns:Record<string,RowData[]>={};for(const sn of wb.SheetNames)ns[sn]=parseSheet(wb.Sheets[sn]);setSh(ns);setSn(wb.SheetNames);setAs(wb.SheetNames[0]);setMode('1')};rd.readAsArrayBuffer(f)}
 
   function buildS2rows(){
-    const agg:Record<string,{sku:string,total:number}>={};for(const r of fd){const sk=String(r.sku||"");if(!sk)continue;if(!agg[sk])agg[sk]={sku:sk,total:0};agg[sk].total+=r.quantity}
-    return Object.values(agg).sort((a,b)=>{const ai=SKU_ORDER.indexOf(a.sku),bi=SKU_ORDER.indexOf(b.sku);if(ai===-1&&bi===-1)return a.sku.localeCompare(b.sku);if(ai===-1)return 1;if(bi===-1)return -1;return ai-bi}).map(({sku,total})=>{
+    // GW는 행별로 TRUNC 후 합산 (BL과 동일한 방식)
+    const agg:Record<string,{sku:string,total:number,gw:number,cbm:number}>={};
+    for(const r of fd){
+      const sk=String(r.sku||"");if(!sk)continue;
+      if(!agg[sk])agg[sk]={sku:sk,total:0,gw:0,cbm:0};
+      agg[sk].total+=r.quantity;
+      const m=master[sk]||({} as MasterItem);
+      // 행별로 calcGW/calcCBM 계산 후 누적
+      agg[sk].gw+=calcGW(r.quantity,parseFloat(String(m.kg))||0);
+      agg[sk].cbm+=calcCBM(r.quantity,parseFloat(String(m.bx))||0,parseFloat(String(m.by))||0,parseFloat(String(m.bz))||0);
+    }
+    return Object.values(agg).sort((a,b)=>{const ai=SKU_ORDER.indexOf(a.sku),bi=SKU_ORDER.indexOf(b.sku);if(ai===-1&&bi===-1)return a.sku.localeCompare(b.sku);if(ai===-1)return 1;if(bi===-1)return -1;return ai-bi}).map(({sku,total,gw,cbm})=>{
       const m=master[sku]||({} as MasterItem);const cpp=parseFloat(String(m.cpp))||16;const meta=s2meta[sku]||{}
-      return {sku,total,cpp,asin:m.asin||"",to:m.to||"",loc:m.loc||"",pallets:Math.ceil(total/cpp),pages:parseFloat((total/6).toFixed(2)),gw:calcGW(total,parseFloat(String(m.kg))||0),cbm:calcCBM(total,parseFloat(String(m.bx))||0,parseFloat(String(m.by))||0,parseFloat(String(m.bz))||0),fc:meta.fc||"",address:meta.address||"",fbaId:meta.fbaId||"",amazonId:meta.amazonId||""}
+      return {sku,total,cpp,asin:m.asin||"",to:m.to||"",loc:m.loc||"",pallets:Math.ceil(total/cpp),pages:parseFloat((total/6).toFixed(2)),gw:Math.round(gw*10)/10,cbm:Math.round(cbm*100)/100,fc:meta.fc||"",address:meta.address||"",fbaId:meta.fbaId||"",amazonId:meta.amazonId||""}
     })
   }
   function buildS3groups(){return ctnNums.map(no=>{const rows=fd.filter(r=>r.container_no===no);const f0=rows[0]||{};const cm=ctnMeta[no]||{};return {no,container:cm.container||"",sealNo:cm.sealNo||"",shipment_date:String(f0.shipment_date||""),shipment_time:String(f0.shipment_time||""),destination:String(f0.destination||""),etd:String(f0.etd||""),eta:String(f0.eta||""),rows}})}
