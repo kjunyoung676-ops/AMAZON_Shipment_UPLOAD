@@ -30,18 +30,18 @@ const MASTER_INIT: Record<string, MasterItem> = {
 }
 
 const ALIASES: Record<string, string[]> = {
-  shipment_date: ["출하 계획(공장)","출하 계획"],
-  shipment_time: ["출하 시간"],
+  shipment_date: ["출하 계획(공장)","출하 계획","출하계획"],
+  shipment_time: ["출하 시간","출하시간"],
   destination:   ["국가","목적지","도착지"],
   model_code:    ["BOM 품번","품번"],
   sku:           ["품목"],
   color:         ["색상"],
   quantity:      ["수량","qty"],
-  qty_total:     ["수량 합계"],
+  qty_total:     ["수량 합계","합계"],
   ctn_count:     ["컨 수량"],
-  ft:            ["FT"],
+  ft:            ["FT","컨테이너"],
   type_old:      ["TYPE (구)"],
-  location:      ["TYPE (신)","로케이션"],
+  location:      ["TYPE (신)","로케이션","신박스코드"],
   etd:           ["출항(ETD)"],
   eta:           ["도착(ETA)"],
   forwarding:    ["포워딩"],
@@ -100,16 +100,46 @@ function normHeaders(rows:RowData[]) {
 function parseSheet(ws:XLSX.WorkSheet):RowData[] {
   if (!ws['!ref']) return []
   const merges=ws['!merges']||[];const range=XLSX.utils.decode_range(ws['!ref']);const hr=range.s.r;const gsr=new Set<number>()
+  // 기존: 병합 셀 기반 그룹 감지
   for (const m of merges) if (m.s.c<=2&&m.e.r>m.s.r&&m.s.r>hr) gsr.add(m.s.r)
   const raw=XLSX.utils.sheet_to_json(ws,{defval:"",cellDates:true}) as Record<string,unknown>[]
-  return raw.map((r,i)=>{const nr:RowData={quantity:0};for(const [k,v] of Object.entries(r)) nr[k]=fmtDate(v);nr.__groupStart=gsr.has(i+hr+1);return nr})
+  if (!raw.length) return []
+
+  // 간소화 양식 감지: '컨테이너' 컬럼이 있으면 간소화 양식
+  const headers = Object.keys(raw[0])
+  const ctnCol = headers.find(h=>h.includes('컨테이너'))
+  const isSimplified = !!ctnCol
+
+  return raw.map((r,i)=>{
+    const nr:RowData={quantity:0}
+    for(const [k,v] of Object.entries(r)) nr[k]=fmtDate(v)
+
+    if (isSimplified && ctnCol) {
+      // 컨테이너 컬럼에 값(40FT 등)이 있으면 새 컨테이너 시작
+      const ctnVal = String(r[ctnCol]||'').trim()
+      nr.__groupStart = ctnVal !== '' && ctnVal !== 'null'
+    } else {
+      nr.__groupStart = gsr.has(i+hr+1)
+    }
+    return nr
+  })
 }
-function forwardFill(rows:RowData[]):RowData[] {
+function forwardFill(rows:RowData[], masterRef?: Record<string,{loc:string}>):RowData[] {
   const res=rows.map(r=>({...r}));const last:Record<string,unknown>={};let ctnNo=0
   for (const row of res) {
     if (row.__groupStart) ctnNo++;if (ctnNo===0) ctnNo=1
     for (const col of FF_COLS){const v=row[col];if(v!==undefined&&v!==''&&v!==null)last[col]=v;else if(col in last)row[col]=last[col]}
     row.container_no=ctnNo
+    // 신박스코드(location)가 없으면 마스터 loc에서 자동 채우기
+    if ((!row.location||row.location==='') && masterRef) {
+      const sku=String(row.sku||'')
+      if (sku && masterRef[sku]?.loc) row.location=masterRef[sku].loc
+    }
+    // TYPE(구)(type_old)가 없으면 마스터 to에서 자동 채우기
+    if ((!row.type_old||row.type_old==='') && masterRef) {
+      const sku=String(row.sku||'')
+      if (sku && (masterRef[sku] as {to?:string})?.to) row.type_old=(masterRef[sku] as {to?:string}).to
+    }
   }
   return res
 }
@@ -145,6 +175,7 @@ export default function ShipmentApp() {
   const [coll,setColl]=useState<Record<string,boolean>>({})
   const [newSku,setNewSku]=useState({...EMPTY_SKU})
   const [fbaLoading,setFbaLoading]=useState(false)
+  const [fbaUploadCtnFilter,setFbaUploadCtnFilter]=useState<number[]>([])
   const [labelFiles,setLabelFiles]=useState<File[]>([])
   const [pltLabelFiles,setPltLabelFiles]=useState<File[]>([])
   const [labelGroups,setLabelGroups]=useState<Record<string,Uint8Array>>({})
@@ -240,7 +271,7 @@ export default function ShipmentApp() {
 
   const raw=(activeSheet&&sheets[activeSheet])||[]
   const {data:nd}=raw.length?normHeaders(raw):{data:[] as RowData[]}
-  const fd=nd.length?forwardFill(nd):[]
+  const fd=nd.length?forwardFill(nd, master):[]
   const ctnNums=[...new Set(fd.map(r=>r.container_no as number))].sort((a,b)=>a-b)
 
   function loadFile(f:File){setFile(f);const rd=new FileReader();rd.onload=e=>{const wb=XLSX.read((e.target as FileReader).result,{type:'array'});const ns:Record<string,RowData[]>={};for(const sn of wb.SheetNames)ns[sn]=parseSheet(wb.Sheets[sn]);setSh(ns);setSn(wb.SheetNames);setAs(wb.SheetNames[0]);setMode('1')};rd.readAsArrayBuffer(f)}
@@ -273,9 +304,47 @@ export default function ShipmentApp() {
   function expS2(){const rows=buildS2rows();const hdr=[["약호","ASIN","구박스","신박스","카톤","PLT당카톤","팔레트","G.W(kg)","CBM","FC CENTER","주소","FBA ID","아마존 ID"]];const body=rows.map(r=>[r.sku,r.asin,r.to,r.loc,r.total,r.cpp,r.pallets,r.gw,r.cbm,r.fc,r.address,r.fbaId,r.amazonId]);const tC=rows.reduce((s,r)=>s+r.total,0),tP=rows.reduce((s,r)=>s+r.pallets,0),tW=rows.reduce((s,r)=>s+r.gw,0),tB=Math.round(rows.reduce((s,r)=>s+r.cbm,0)*100)/100;xlsDl([...hdr,...body,["합계","","","",tC,"",tP,tW,tB]],activeSheet||"S2","1차가공_"+(activeSheet||"data")+".xlsx")}
   function expS3(){const hdr=[["CONTAINER","SEAL NO.","약호","BOX CODE","ASIN","FBA ID","아마존 ID","FC CENTER","주소","PLT","CT","CTN/PLT","G.W(kg)","CBM"]];const body:unknown[][]=[];for(const g of buildS3groups()){let first=true;for(const r of g.rows){const m=master[String(r.sku)]||({} as MasterItem);const cpp=parseFloat(String(m.cpp))||16;const sk=s2meta[String(r.sku)]||{};body.push([first?g.container:"",first?g.sealNo:"",r.sku,r.location||m.loc||"",m.asin||"",sk.fbaId||"",sk.amazonId||"",sk.fc||"",first?(sk.address||""):"",Math.ceil(r.quantity/cpp),r.quantity,cpp+"CTN/PLT",calcGW(r.quantity,parseFloat(String(m.kg))||0),calcCBM(r.quantity,parseFloat(String(m.bx))||0,parseFloat(String(m.by))||0,parseFloat(String(m.bz))||0)]);first=false}};xlsDl([...hdr,...body],activeSheet||"S3","2차가공_"+(activeSheet||"data")+".xlsx")}
 
-  async function expFbaUpload(){
+  async function expFbaUpload(ctnFilter?: number[]){
     setFbaLoading(true)
-    try{const res=await fetch("/UPLOAD_FORMAT.xlsx");if(!res.ok)throw new Error("파일 로드 실패 ("+res.status+")");const buf=await res.arrayBuffer();const wb=XLSX.read(buf,{type:"array",cellStyles:true,cellNF:true,cellDates:true,sheetStubs:true});const tplName=wb.SheetNames.find(n=>n.toLowerCase().includes("template"));if(!tplName)throw new Error("template 시트를 찾을 수 없습니다: "+wb.SheetNames.join(", "));const ws=wb.Sheets[tplName];const rows=buildS2rows();rows.forEach((r,i)=>{const row=9+i;const m=master[r.sku]||({} as MasterItem);const realSku=m.sku||r.sku;const set=(col:string,t:"s"|"n",v:string|number)=>{ws[col+row]={...(ws[col+row]||{}),t,v,w:String(v)}};set("A","s",realSku);set("B","n",r.total);set("F","n",1);set("G","n",r.total);set("H","n",m.bx||0);set("I","n",m.by||0);set("J","n",m.bz||0);set("K","n",m.kg||0)});if(rows.length>0){const decoded=XLSX.utils.decode_range(ws["!ref"]||"A1:K8");decoded.e.r=Math.max(decoded.e.r,8+rows.length-1);decoded.e.c=Math.max(decoded.e.c,10);ws["!ref"]=XLSX.utils.encode_range(decoded)};XLSX.writeFile(wb,"UPLOAD_FORMAT_filled.xlsx",{cellStyles:true,compression:true})}catch(e){alert("오류: "+(e as Error).message)}finally{setFbaLoading(false)}
+    try{
+      const res=await fetch("/UPLOAD_FORMAT.xlsx");if(!res.ok)throw new Error("파일 로드 실패 ("+res.status+")");
+      const buf=await res.arrayBuffer();
+      const wb=XLSX.read(buf,{type:"array",cellStyles:true,cellNF:true,cellDates:true,sheetStubs:true});
+      const tplName=wb.SheetNames.find(n=>n.toLowerCase().includes("template"));
+      if(!tplName)throw new Error("template 시트를 찾을 수 없습니다: "+wb.SheetNames.join(", "));
+      const ws=wb.Sheets[tplName];
+
+      // 컨테이너 필터 적용: fd에서 해당 컨테이너 행만 추출 후 SKU별 합산
+      const filteredFd = (ctnFilter&&ctnFilter.length>0)
+        ? fd.filter(r=>ctnFilter.includes(r.container_no as number))
+        : fd
+
+      // buildS2rows와 동일 방식으로 필터된 fd 기준 집계
+      const agg: Record<string,{sku:string,total:number,gw:number}> = {}
+      for (const r of filteredFd) {
+        const sk=String(r.sku||''); if(!sk) continue
+        if (!agg[sk]) agg[sk]={sku:sk,total:0,gw:0}
+        agg[sk].total+=r.quantity
+        const m=master[sk]||({} as MasterItem)
+        agg[sk].gw+=calcGW(r.quantity,parseFloat(String(m.kg))||0)
+      }
+      const rows=Object.values(agg)
+
+      rows.forEach((r,i)=>{
+        const row=9+i;const m=master[r.sku]||({} as MasterItem);const realSku=m.sku||r.sku;
+        const set=(col:string,t:"s"|"n",v:string|number)=>{ws[col+row]={...(ws[col+row]||{}),t,v,w:String(v)}};
+        set("A","s",realSku);set("B","n",r.total);set("F","n",1);set("G","n",r.total);
+        set("H","n",m.bx||0);set("I","n",m.by||0);set("J","n",m.bz||0);set("K","n",m.kg||0)
+      });
+      if(rows.length>0){
+        const decoded=XLSX.utils.decode_range(ws["!ref"]||"A1:K8");
+        decoded.e.r=Math.max(decoded.e.r,8+rows.length-1);decoded.e.c=Math.max(decoded.e.c,10);
+        ws["!ref"]=XLSX.utils.encode_range(decoded)
+      }
+      // 파일명에 컨테이너 범위 포함
+      const suffix = (ctnFilter&&ctnFilter.length>0) ? `_컨${ctnFilter.join('_')}` : '_전체'
+      XLSX.writeFile(wb,`UPLOAD_FORMAT_filled${suffix}.xlsx`,{cellStyles:true,compression:true})
+    }catch(e){alert("오류: "+(e as Error).message)}finally{setFbaLoading(false)}
   }
 
   // ── 표지 페이지 생성 (카톤 라벨) ─────────────────────────────
@@ -1014,13 +1083,57 @@ export default function ShipmentApp() {
             <div style={{textAlign:"center",padding:"5rem 0",color:"var(--color-text-tertiary)"}}><div style={{fontSize:48,marginBottom:12}}>📦</div><p style={{fontSize:15}}>쉽먼트 파일을 업로드해주세요</p><p style={{fontSize:12,marginTop:4}}>시트가 여러 개면 탭으로 구분됩니다</p></div>
           ):(
             <div style={{display:"flex",flexDirection:"column",gap:10}}>
-              {ctnNums.map(no=>{const rows=fd.filter(r=>r.container_no===no);const f0=rows[0],ci=(no-1)%CB.length;const sumQ=rows.reduce((s,r)=>s+r.quantity,0);const dQ=parseFloat(String(f0.qty_total))||sumQ;const key="s1_"+no,open=isOpen(key);return(
+              {ctnNums.map(no=>{const rows=fd.filter(r=>r.container_no===no);const f0=rows[0],ci=(no-1)%CB.length;const sumQ=rows.reduce((s,r)=>s+r.quantity,0);const dQ=parseFloat(String(f0.qty_total))||sumQ;const key="s1_"+no,open=isOpen(key)
+                // 데이터 있는 컬럼만 표시
+                const hasDate=rows.some(r=>r.shipment_date&&String(r.shipment_date).trim()!=='')
+                const hasDest=rows.some(r=>r.destination&&String(r.destination).trim()!=='')
+                const hasModel=rows.some(r=>r.model_code&&String(r.model_code).trim()!=='')
+                const hasColor=rows.some(r=>r.color&&String(r.color).trim()!=='')
+                const hasTypeOld=rows.some(r=>r.type_old&&String(r.type_old).trim()!=='')
+                const hasEtd=rows.some(r=>r.etd&&String(r.etd).trim()!=='')
+                const hasEta=rows.some(r=>r.eta&&String(r.eta).trim()!=='')
+                return(
                 <div key={no} style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",overflow:"hidden"}}>
                   <div onClick={()=>togCtn(key)} style={{background:CB[ci],color:CT[ci],padding:"9px 14px",display:"flex",alignItems:"center",gap:12,flexWrap:"wrap",cursor:"pointer",userSelect:"none"}}>
-                    <span style={{fontWeight:500,fontSize:13}}>컨{no}</span><span style={{fontWeight:500}}>{String(f0.shipment_date||"")}</span>{tag("",f0.shipment_time)}<span style={{fontWeight:500}}>{String(f0.destination||"")}</span>{tag("ETD ",f0.etd)}{tag("ETA ",f0.eta)}{tag("선사 ",f0.carrier)}
-                    <span style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:8}}><span style={{fontWeight:500,fontSize:13}}>{dQ.toLocaleString()}개{f0.ctn_count&&f0.ctn_count!=="0"?" · "+f0.ctn_count+"컨":""}{f0.ft&&f0.ft!=="0"?" · "+f0.ft+"FT":""}</span><span style={{fontSize:11,opacity:0.6}}>{open?"▲":"▼"}</span></span>
+                    <span style={{fontWeight:500,fontSize:13}}>컨{no}</span>
+                    {hasDate&&<span style={{fontWeight:500}}>{String(f0.shipment_date||"")}</span>}
+                    {tag("",f0.shipment_time)}
+                    {hasDest&&<span style={{fontWeight:500}}>{String(f0.destination||"")}</span>}
+                    {tag("ETD ",f0.etd)}{tag("ETA ",f0.eta)}{tag("선사 ",f0.carrier)}
+                    <span style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:8}}><span style={{fontWeight:500,fontSize:13}}>{dQ.toLocaleString()}개{f0.ctn_count&&f0.ctn_count!=="0"?" · "+f0.ctn_count+"컨":""}{f0.ft&&f0.ft!=="0"?" · "+f0.ft:""}</span><span style={{fontSize:11,opacity:0.6}}>{open?"▲":"▼"}</span></span>
                   </div>
-                  {open&&(<div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:600}}><thead><tr>{["BOM품번","약호(SKU)","색상","수량","TYPE(구)","신박스코드","ETD","ETA"].map(h=><th key={h} style={TH}>{h}</th>)}</tr></thead><tbody>{rows.map((r,i)=>(<tr key={i} style={{background:i%2===0?"transparent":"var(--color-background-secondary)"}}><td style={{...TD,fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)",minWidth:130}}>{String(r.model_code||"")}</td><td style={{...TD,fontWeight:500,minWidth:120}}>{String(r.sku||"")}</td><td style={{...TD,minWidth:50}}>{String(r.color||"")}</td><td style={{...TD,textAlign:"right",fontWeight:500,minWidth:50}}>{r.quantity.toLocaleString()}</td><td style={{...TD,color:"var(--color-text-secondary)"}}>{String(r.type_old||"")}</td><td style={{...TD,color:"var(--color-text-info)",fontWeight:500}}>{String(r.location||"")}</td><td style={TD}>{String(r.etd||"")}</td><td style={TD}>{String(r.eta||"")}</td></tr>))}</tbody><tfoot><tr style={{background:"var(--color-background-secondary)",borderTop:"1px solid var(--color-border-secondary)"}}><td colSpan={3} style={{...TD,textAlign:"right",fontSize:11,color:"var(--color-text-secondary)"}}>소계</td><td style={{...TD,textAlign:"right",fontWeight:500}}>{sumQ.toLocaleString()}</td><td colSpan={4} style={TD}></td></tr></tfoot></table></div>)}
+                  {open&&(<div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:400}}>
+                    <thead><tr>
+                      {hasModel&&<th style={TH}>BOM품번</th>}
+                      <th style={TH}>약호(SKU)</th>
+                      {hasColor&&<th style={TH}>색상</th>}
+                      <th style={{...TH,textAlign:"right"}}>수량</th>
+                      {hasTypeOld&&<th style={TH}>TYPE(구)</th>}
+                      <th style={TH}>신박스코드</th>
+                      {hasEtd&&<th style={TH}>ETD</th>}
+                      {hasEta&&<th style={TH}>ETA</th>}
+                    </tr></thead>
+                    <tbody>{rows.map((r,i)=>{
+                      // TYPE(구) 없으면 마스터에서 자동
+                      const typeOld = String(r.type_old||'')||String((master[String(r.sku||'')] as {to?:string})?.to||'')
+                      const loc = String(r.location||'')||String((master[String(r.sku||'')] as {loc?:string})?.loc||'')
+                      return(<tr key={i} style={{background:i%2===0?"transparent":"var(--color-background-secondary)"}}>
+                        {hasModel&&<td style={{...TD,fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)",minWidth:120}}>{String(r.model_code||"")}</td>}
+                        <td style={{...TD,fontWeight:500,minWidth:120}}>{String(r.sku||"")}</td>
+                        {hasColor&&<td style={{...TD,minWidth:50}}>{String(r.color||"")}</td>}
+                        <td style={{...TD,textAlign:"right",fontWeight:500,minWidth:50}}>{r.quantity.toLocaleString()}</td>
+                        {hasTypeOld&&<td style={{...TD,color:"var(--color-text-secondary)"}}>{typeOld}</td>}
+                        <td style={{...TD,color:"var(--color-text-info)",fontWeight:500}}>{loc}</td>
+                        {hasEtd&&<td style={TD}>{String(r.etd||"")}</td>}
+                        {hasEta&&<td style={TD}>{String(r.eta||"")}</td>}
+                      </tr>)
+                    })}</tbody>
+                    <tfoot><tr style={{background:"var(--color-background-secondary)",borderTop:"1px solid var(--color-border-secondary)"}}>
+                      <td colSpan={[hasModel,true,hasColor,true,hasTypeOld,true,hasEtd,hasEta].filter(Boolean).length-1} style={{...TD,textAlign:"right",fontSize:11,color:"var(--color-text-secondary)"}}>소계</td>
+                      <td style={{...TD,textAlign:"right",fontWeight:500}}>{sumQ.toLocaleString()}</td>
+                      <td colSpan={[hasTypeOld,true,hasEtd,hasEta].filter(Boolean).length} style={TD}></td>
+                    </tr></tfoot>
+                  </table></div>)}
                 </div>
               )})}
             </div>
@@ -1040,7 +1153,17 @@ export default function ShipmentApp() {
               <input ref={metaJsonRef} type="file" accept=".json" style={{display:"none"}} onChange={e=>{const f=e.target.files?.[0];if(f){importMetaJson(f);e.target.value=""}}}/>
             </label>
             <button onClick={expS2} style={{marginLeft:"auto",fontSize:11,padding:"3px 10px"}}>xlsx 저장</button>
-            <button onClick={expFbaUpload} disabled={fbaLoading} style={{fontSize:11,padding:"3px 10px",background:"var(--color-background-success)",border:"0.5px solid var(--color-border-success)",color:"var(--color-text-success)",borderRadius:"var(--border-radius-md)",cursor:fbaLoading?"default":"pointer",opacity:fbaLoading?0.6:1}}>{fbaLoading?"처리 중...":"FBA 업로드 양식"}</button>
+            {/* FBA 업로드 양식: 컨테이너 선택 후 다운로드 */}
+            <div style={{display:"flex",alignItems:"center",gap:4,flexWrap:"wrap"}}>
+              <span style={{fontSize:11,color:"var(--color-text-tertiary)"}}>FBA 업로드:</span>
+              {ctnNums.map(no=>(
+                <button key={no} onClick={()=>setFbaUploadCtnFilter(prev=>prev.includes(no)?prev.filter(n=>n!==no):[...prev,no])} style={{fontSize:11,padding:"2px 8px",borderRadius:4,border:`0.5px solid ${fbaUploadCtnFilter.includes(no)?"var(--color-border-info)":"var(--color-border-tertiary)"}`,background:fbaUploadCtnFilter.includes(no)?"rgba(219,234,254,0.5)":"transparent",color:fbaUploadCtnFilter.includes(no)?"var(--color-text-info)":"var(--color-text-secondary)",cursor:"pointer",fontWeight:fbaUploadCtnFilter.includes(no)?600:400}}>컨{no}</button>
+              ))}
+              <button onClick={()=>setFbaUploadCtnFilter([])} style={{fontSize:10,padding:"2px 6px",borderRadius:4,border:"0.5px solid var(--color-border-tertiary)",background:"transparent",color:"var(--color-text-tertiary)",cursor:"pointer"}}>전체</button>
+              <button onClick={()=>expFbaUpload(fbaUploadCtnFilter.length>0?fbaUploadCtnFilter:undefined)} disabled={fbaLoading} style={{fontSize:11,padding:"3px 10px",background:"var(--color-background-success)",border:"0.5px solid var(--color-border-success)",color:"var(--color-text-success)",borderRadius:"var(--border-radius-md)",cursor:fbaLoading?"default":"pointer",opacity:fbaLoading?0.6:1,fontWeight:500}}>
+                {fbaLoading?"처리 중...":`↓ ${fbaUploadCtnFilter.length>0?`컨${fbaUploadCtnFilter.join('·')} 분리`:"전체"}`}
+              </button>
+            </div>
             <button onClick={()=>setMode('3')} style={{fontSize:12,padding:"5px 14px",background:"var(--color-background-success)",border:"0.5px solid var(--color-border-success)",color:"var(--color-text-success)",borderRadius:"var(--border-radius-md)",cursor:"pointer",fontWeight:500}}>2차 가공으로 →</button>
           </div>
           <SheetTabs/>
