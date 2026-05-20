@@ -1049,7 +1049,7 @@ export default function ShipmentApp() {
   const totC=s2rows.reduce((s,r)=>s+r.total,0),totP=s2rows.reduce((s,r)=>s+r.pallets,0),totW=s2rows.reduce((s,r)=>s+r.gw,0),totCBM=Math.round(s2rows.reduce((s,r)=>s+r.cbm,0)*100)/100
 
   function NavBtn({m,label}:{m:string,label:string}){
-    const active=mode===m,avail=m==='1'||m==='map'||m==='label'||m==='logistics'||m==='s3b'||!!file
+    const active=mode===m,avail=m==='1'||m==='map'||m==='label'||m==='logistics'||m==='s3b'||m==='cj'||!!file
     return(<button onClick={()=>avail&&setMode(m)} style={{padding:"8px 16px",fontSize:12,fontWeight:active?500:400,cursor:avail?"pointer":"default",border:"none",background:active?"var(--color-text-primary)":"transparent",color:active?"var(--color-background-primary)":avail?"var(--color-text-secondary)":"var(--color-text-tertiary)"}}>{label}</button>)
   }
 
@@ -1060,6 +1060,7 @@ export default function ShipmentApp() {
         <div style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",overflow:"hidden",display:"flex"}}>
           <NavBtn m="1" label="1. 업로드"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
           <NavBtn m="2" label="2. 1차 가공 (준비)"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
+          <NavBtn m="cj" label="1.5. CJ 출고"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
           <NavBtn m="label" label="2. 라벨 분류"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
           <NavBtn m="logistics" label="2-5. 물류 전달"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
           <NavBtn m="3" label="3. 2차 가공 (적재)"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
@@ -2047,7 +2048,132 @@ ${ctnBlocks}
         )
       })()}
 
-      {/* ══ 매핑 관리 ══ */}
+      {/* ══ 1.5. CJ 출고 ══ */}
+      {mode==='cj'&&(()=>{
+        const SHEET_ID = '1FanL4UnHfRoUj-d-8C1efLdywqB_qmsx-9eEeYuvNNs'
+        const SHEET_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit`
+
+        type CJRow = {
+          ctnNo: number; etd: string; eta: string; pod: string; blNo: string;
+          cntrNo: string; teu: number
+          products: string; boxCodes: string
+          plt: number; ctn: number; fc: string
+        }
+
+        const cjRows: CJRow[] = ctnNums.map(no => {
+          const rows = fd.filter(r=>r.container_no===no)
+          const f0 = rows[0] || {}
+          const meta = ctnMeta[no] || {}
+
+          const dest = String(f0.destination||''  ).toLowerCase()
+          let pod = ''
+          if (dest.includes('오사카')||dest.includes('osaka')) pod = 'JPOSA'
+          else if (dest.includes('도쿄')||dest.includes('tokyo')) pod = 'JPTYO'
+          else if (dest.includes('함부르크')||dest.includes('hamburg')) pod = 'DEHAM'
+          else pod = String(f0.destination||''  )
+
+          const ftVal = String(f0.ft||meta.container||''  )
+          const teu = ftVal.includes('40') ? 2 : ftVal.includes('20') ? 1 : 2
+
+          const skuMap: Record<string,{plt:number;ctn:number;loc:string;fc:string}> = {}
+          for (const r of rows) {
+            const sku = String(r.sku||''  ); if(!sku) continue
+            const m = master[sku] || {} as MasterItem
+            const cpp = parseFloat(String(m.cpp))||16
+            const loc = String(r.location||m.loc||''  )
+            const fc = (s2meta[sku]||{}).fc||''
+            if (!skuMap[sku]) skuMap[sku]={plt:0,ctn:0,loc,fc}
+            skuMap[sku].plt += Math.ceil(r.quantity/cpp)
+            skuMap[sku].ctn += r.quantity
+          }
+
+          const skuList = Object.entries(skuMap)
+          const fcSet = new Set(skuList.map(([,v])=>v.fc).filter(Boolean))
+
+          return {
+            ctnNo: no,
+            etd: String(f0.etd||''  ),
+            eta: String(f0.eta||''  ),
+            pod,
+            blNo: String(f0.booking_ref||''  ),
+            cntrNo: String(meta.container||''  ),
+            teu,
+            products: skuList.map(([sku])=>sku).join('\n'),
+            boxCodes: skuList.map(([,v])=>v.loc).join('\n'),
+            plt: skuList.reduce((s,[,v])=>s+v.plt,0),
+            ctn: skuList.reduce((s,[,v])=>s+v.ctn,0),
+            fc: [...fcSet].join(', '),
+          }
+        })
+
+        function tsvCell(val: string) {
+          if (val.includes('\n')||val.includes('"')||val.includes('\t')) return '"' + val.replace(/"/g, '\"\\"\"') + '"' 
+          return val
+        }
+
+        function copyForSheets() {
+          const tsv = cjRows.map(r =>
+            [r.etd, r.eta, r.pod, r.blNo, r.cntrNo, r.teu,
+              tsvCell(r.products), tsvCell(r.boxCodes),
+              r.plt, r.ctn, r.fc
+            ].join('\t')
+          ).join('\n')
+          navigator.clipboard.writeText(tsv).then(()=>alert('클립보드에 복사됐습니다!\n구글 시트의 ETD 첫 번째 빈 셀에서 붙여넣기(Ctrl+V) 하세요.'))
+        }
+
+        return (
+          <div>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14,flexWrap:"wrap"}}>
+              <span style={{fontSize:12,color:"var(--color-text-secondary)"}}>컨테이너별 출고 데이터 → SPEED RACK_CJLJ埼玉センター 시트</span>
+              <a href={SHEET_URL} target="_blank" rel="noreferrer" style={{fontSize:11,padding:"3px 10px",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-info)",color:"var(--color-text-info)",textDecoration:"none",background:"rgba(219,234,254,0.2)"}}>📊 시트 열기</a>
+              <button onClick={copyForSheets} style={{fontSize:11,padding:"3px 10px",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-success)",color:"var(--color-text-success)",background:"rgba(209,250,229,0.2)",cursor:"pointer"}}>📋 TSV 복사 (시트 붙여넣기용)</button>
+            </div>
+            <SheetTabs/>
+            {!file ? (
+              <p style={{textAlign:"center",padding:"3rem 0",color:"var(--color-text-tertiary)"}}>파일을 먼저 업로드해주세요</p>
+            ) : (
+              <>
+                <div style={{overflowX:"auto",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",marginBottom:12}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                    <thead><tr>
+                      {['ETD','ETA','POD','B/L No.','CNTR No.','TEU','Product code','BOX CODE','PLT','CTN','FC'].map(h=>(
+                        <th key={h} style={{...TH,textAlign:['PLT','CTN','TEU'].includes(h)?'right':'left'}}>{h}</th>
+                      ))}
+                    </tr></thead>
+                    <tbody>{cjRows.map((r,i)=>{
+                      const ci=(r.ctnNo-1)%CB.length
+                      return(
+                        <tr key={i} style={{background:i%2===0?"transparent":"var(--color-background-secondary)"}}>
+                          <td style={{...TD,minWidth:80,borderLeft:`3px solid ${CB[ci]}`}}>
+                            <div style={{fontSize:10,color:"var(--color-text-tertiary)",marginBottom:2}}>컨{r.ctnNo}</div>
+                            <input defaultValue={r.etd} style={{...INP,width:"100%"}} placeholder="05월 14일"/>
+                          </td>
+                          <td style={{...TD,minWidth:80}}><input defaultValue={r.eta} style={{...INP,width:"100%"}} placeholder="05월 20일"/></td>
+                          <td style={{...TD,minWidth:60}}><input defaultValue={r.pod} style={{...INP,width:"100%"}} placeholder="JPOSA"/></td>
+                          <td style={{...TD,minWidth:120}}><input defaultValue={r.blNo} style={{...INP,width:"100%"}} placeholder="B/L No."/></td>
+                          <td style={{...TD,minWidth:110}}><input defaultValue={r.cntrNo} style={{...INP,width:"100%"}} placeholder="ONEU6916846"/></td>
+                          <td style={{...TD,textAlign:"right"}}>{r.teu}</td>
+                          <td style={{...TD,minWidth:130,fontSize:11,whiteSpace:"pre-line",lineHeight:"1.6"}}>{r.products}</td>
+                          <td style={{...TD,minWidth:80,fontSize:11,color:"var(--color-text-info)",fontWeight:500,whiteSpace:"pre-line",lineHeight:"1.6"}}>{r.boxCodes}</td>
+                          <td style={{...TD,textAlign:"right",fontWeight:500}}>{r.plt}</td>
+                          <td style={{...TD,textAlign:"right"}}>{r.ctn.toLocaleString()}</td>
+                          <td style={{...TD,color:"var(--color-text-info)",fontWeight:500}}>{r.fc}</td>
+                        </tr>
+                      )
+                    })}</tbody>
+                  </table>
+                </div>
+                <div style={{padding:"8px 12px",background:"rgba(219,234,254,0.2)",borderRadius:"var(--border-radius-md)",fontSize:11,color:"var(--color-text-secondary)",border:"0.5px solid var(--color-border-info)"}}>
+                  💡 <strong>사용 방법:</strong> ETD/ETA/CNTR No./B/L No. 직접 입력 → 📋 TSV 복사 → 구글 시트 ETD 첫 빈 셀 클릭 → Ctrl+V
+                  &nbsp;·&nbsp; Product code/BOX CODE는 셀 안에 줄바꿈으로 입력됩니다
+                </div>
+              </>
+            )}
+          </div>
+        )
+      })()}
+
+            {/* ══ 매핑 관리 ══ */}
       {mode==='map'&&(
         <div>
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}>
