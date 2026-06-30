@@ -149,6 +149,42 @@ function forwardFill(rows:RowData[], masterRef?: Record<string,{loc:string}>):Ro
 }
 function xlsDl(data:unknown[],sn:string,fn:string){const wb=XLSX.utils.book_new();const ws=Array.isArray(data[0])?XLSX.utils.aoa_to_sheet(data as unknown[][]):XLSX.utils.json_to_sheet(data as Record<string,unknown>[]);XLSX.utils.book_append_sheet(wb,ws,sn||"data");XLSX.writeFile(wb,fn)}
 
+// ── JSZip 외과적 XLSX 패치 헬퍼 (모듈 레벨) ─────────────────────────────
+// 특정 셀을 inline string으로 교체 (이미지/서식/드로잉 손대지 않음)
+function xmlSetCell(xml:string, cellRef:string, value:string):string{
+  const esc=value.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+  const re=new RegExp(`<c\\s+r="${cellRef}"([^>]*)(?:/>|>[\\s\\S]*?</c>)`)
+  if(re.test(xml)){
+    return xml.replace(re,(_m,attrs)=>{
+      const s=(attrs.match(/\bs="(\d+)"/)??[])[1]
+      return `<c r="${cellRef}"${s?` s="${s}"`:''}  t="inlineStr"><is><t>${esc}</t></is></c>`
+    })
+  }
+  // 셀이 없으면 해당 행에 삽입
+  const rowNum=(cellRef.match(/\d+/)??[])[0]
+  if(!rowNum) return xml
+  const rowRe=new RegExp(`(<row[^>]+\\br="${rowNum}"[^>]*>)`)
+  if(rowRe.test(xml)) return xml.replace(rowRe,`$1<c r="${cellRef}" t="inlineStr"><is><t>${esc}</t></is></c>`)
+  return xml
+}
+function xmlClearCell(xml:string, cellRef:string):string{ return xmlSetCell(xml,cellRef,'') }
+
+// workbook.xml + _rels → { 시트이름: 'xl/worksheets/sheetN.xml' }
+async function getSheetFileMap(zip:{file:(p:string)=>({async:(t:'text')=>Promise<string>})|null}):Promise<Map<string,string>>{
+  const wbXml=await zip.file('xl/workbook.xml')!.async('text')
+  const relsXml=await zip.file('xl/_rels/workbook.xml.rels')!.async('text')
+  const nameToRid=new Map<string,string>()
+  for(const m of wbXml.matchAll(/<sheet\s[^>]*name="([^"]+)"[^>]*r:id="([^"]+)"/g)) nameToRid.set(m[1],m[2])
+  const ridToPath=new Map<string,string>()
+  for(const m of relsXml.matchAll(/<Relationship\s[^>]*Id="([^"]+)"[^>]*Target="([^"]+)"/g)) ridToPath.set(m[1],m[2])
+  const result=new Map<string,string>()
+  for(const [name,rid] of nameToRid){
+    const rel=ridToPath.get(rid)
+    if(rel) result.set(name, rel.startsWith('/')?rel.slice(1):`xl/${rel}`)
+  }
+  return result
+}
+
 export default function ShipmentApp() {
   const [sheets,setSh]=useState<Record<string,RowData[]>>({})
   const [sheetNames,setSn]=useState<string[]>([])
@@ -232,6 +268,7 @@ export default function ShipmentApp() {
   const [ciplWB,setCiplWB]=useState<XLSX.WorkBook|null>(null)
   const [ciplPort,setCiplPort]=useState<'kanto'|'kansai'>('kanto')
   const ciplRef=useRef<HTMLInputElement>(null)
+  const ciplRawRef=useRef<ArrayBuffer|null>(null)
 
   // ── 납품처 정보 상태 ─────────────────────────────────────────────────────
   const [dlBL_Saitama,setDlBL_Saitama]=useState('')
@@ -256,77 +293,71 @@ export default function ShipmentApp() {
     setCiplFile(f)
     const reader=new FileReader()
     reader.onload=e=>{
-      const data=new Uint8Array(e.target!.result as ArrayBuffer)
-      const wb=XLSX.read(data,{type:'array',cellStyles:true,cellFormula:true})
+      const buf=e.target!.result as ArrayBuffer
+      ciplRawRef.current=buf
+      const wb=XLSX.read(new Uint8Array(buf),{type:'array',cellStyles:true,cellFormula:true})
       setCiplWB(wb)
     }
     reader.readAsArrayBuffer(f)
   }
 
-  function downloadCipl(){
-    if(!ciplWB) return
-    // 원본 workbook 클론 (수식+스타일 보존)
-    const rawBytes=XLSX.write(ciplWB,{bookType:'xlsx',type:'array',cellStyles:true}) as Uint8Array
-    const wb2=XLSX.read(rawBytes,{type:'array',cellStyles:true,cellFormula:true})
-    const inv=wb2.Sheets['Invoice ']
-    const pack=wb2.Sheets['Packing ']
+  async function downloadCipl(){
+    if(!ciplWB||!ciplRawRef.current) return
+    // SheetJS로 파싱된 값에서 미리 읽기 (쓰기는 JSZip이 담당)
+    const inv=ciplWB.Sheets['Invoice ']
+    const pack=ciplWB.Sheets['Packing ']
     if(!inv||!pack){ alert('Invoice 또는 Packing 시트를 찾을 수 없습니다'); return }
-
+    const cntrCount=String(pack['H18']?.v||'')  // H18 덮기 전에 먼저 저장
     const invNo=String(inv['H3']?.v||ciplFile?.name.replace('.xlsx','')||'JP')
     const notify=ciplPort==='kanto'?JP_NOTIFY_KANTO:JP_NOTIFY_KANSAI
 
-    // ── Invoice 시트 변환 ──
-    // Consignee (A8, A10-A15): 수출자 이름 → 이메일, 수입자 → Homedant 자기 주소
-    setCiplCell(inv,'A8','global@speedrack.kr')
-    setCiplCell(inv,'A10',JP_CONSIGNEE_LINES[0])
-    setCiplCell(inv,'A11',JP_CONSIGNEE_LINES[1])
-    setCiplCell(inv,'A12',JP_CONSIGNEE_LINES[2])
-    setCiplCell(inv,'A13',JP_CONSIGNEE_LINES[3])
-    setCiplCell(inv,'A14',JP_CONSIGNEE_LINES[4])
-    setCiplCell(inv,'A15',JP_CONSIGNEE_LINES[5])
-    // 우측 헤더: H15 Other references → ACP info + Country of Origin + Terms
-    setCiplCell(inv,'H15','(10)ACP information')
-    setCiplCell(inv,'H16',JP_ACP_LINES[0])
-    setCiplCell(inv,'H17',JP_ACP_LINES[1])
-    setCiplCell(inv,'H18',JP_ACP_LINES[2])
-    setCiplCell(inv,'H19',JP_ACP_LINES[3])
-    setCiplCell(inv,'H20','(11)Country of Origin')
-    setCiplCell(inv,'H21','SOUTH KOREA')
-    setCiplCell(inv,'H22','(12)Terms of delivery and payment')
-    setCiplCell(inv,'H23','Shipping condition : CFR')
+    // JSZip으로 원본 파일 열기 (이미지/서식/드로잉 100% 보존)
+    const {default:JSZip}=await import('jszip')
+    const zip=await JSZip.loadAsync(ciplRawRef.current)
+    const sheetMap=await getSheetFileMap(zip)
 
-    // ── Packing 시트 변환 ──
-    // 컨테이너 수 (한국판 H18에 있음 — ACP info 덮기 전에 먼저 저장)
-    const cntrCount=String(pack['H18']?.v||'')
-    setCiplCell(pack,'A8','global@speedrack.kr')
-    setCiplCell(pack,'A10',JP_CONSIGNEE_LINES[0])
-    setCiplCell(pack,'A11',JP_CONSIGNEE_LINES[1])
-    setCiplCell(pack,'A12',JP_CONSIGNEE_LINES[2])
-    setCiplCell(pack,'A13',JP_CONSIGNEE_LINES[3])
-    setCiplCell(pack,'A14',JP_CONSIGNEE_LINES[4])
-    setCiplCell(pack,'A15',JP_CONSIGNEE_LINES[5])
-    // Notify Party (H10-H14)
-    setCiplCell(pack,'H10',notify[0])
-    setCiplCell(pack,'H11',notify[1])
-    setCiplCell(pack,'H12',notify[2])
-    setCiplCell(pack,'H13',notify[3])
-    setCiplCell(pack,'H14',notify[4])
-    clearCiplCell(pack,'H15')
-    // ACP info (H16-H20)
-    setCiplCell(pack,'H16','(9)ACP information')
-    setCiplCell(pack,'H17',JP_ACP_LINES[0])
-    setCiplCell(pack,'H18',JP_ACP_LINES[1])
-    setCiplCell(pack,'H19',JP_ACP_LINES[2])
-    setCiplCell(pack,'H20',JP_ACP_LINES[3])
-    clearCiplCell(pack,'H21')
-    // Other references → H22-H23
-    setCiplCell(pack,'H22','(10)Other references')
-    if(cntrCount) setCiplCell(pack,'H23',cntrCount)
-    else clearCiplCell(pack,'H23')
+    async function patchSheet(name:string, patches:[string,string][], clears:string[]){
+      const path=sheetMap.get(name)
+      if(!path){ console.warn(`시트 없음: "${name}"`); return }
+      const f=zip.file(path); if(!f) return
+      let xml=await f.async('text')
+      for(const [cell,val] of patches) xml=xmlSetCell(xml,cell,val)
+      for(const cell of clears) xml=xmlClearCell(xml,cell)
+      zip.file(path,xml)
+    }
 
-    // 다운로드
-    const outBytes=XLSX.write(wb2,{bookType:'xlsx',type:'array',cellStyles:true}) as Uint8Array
-    const blob=new Blob([outBytes],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})
+    // Invoice 시트
+    await patchSheet('Invoice ',[
+      ['A8','global@speedrack.kr'],
+      ['A10',JP_CONSIGNEE_LINES[0]],['A11',JP_CONSIGNEE_LINES[1]],
+      ['A12',JP_CONSIGNEE_LINES[2]],['A13',JP_CONSIGNEE_LINES[3]],
+      ['A14',JP_CONSIGNEE_LINES[4]],['A15',JP_CONSIGNEE_LINES[5]],
+      ['H15','(10)ACP information'],
+      ['H16',JP_ACP_LINES[0]],['H17',JP_ACP_LINES[1]],
+      ['H18',JP_ACP_LINES[2]],['H19',JP_ACP_LINES[3]],
+      ['H20','(11)Country of Origin'],['H21','SOUTH KOREA'],
+      ['H22','(12)Terms of delivery and payment'],['H23','Shipping condition : CFR'],
+    ],[])
+
+    // Packing 시트
+    const packPatches:[string,string][]=[
+      ['A8','global@speedrack.kr'],
+      ['A10',JP_CONSIGNEE_LINES[0]],['A11',JP_CONSIGNEE_LINES[1]],
+      ['A12',JP_CONSIGNEE_LINES[2]],['A13',JP_CONSIGNEE_LINES[3]],
+      ['A14',JP_CONSIGNEE_LINES[4]],['A15',JP_CONSIGNEE_LINES[5]],
+      ['H10',notify[0]],['H11',notify[1]],['H12',notify[2]],
+      ['H13',notify[3]],['H14',notify[4]],
+      ['H16','(9)ACP information'],
+      ['H17',JP_ACP_LINES[0]],['H18',JP_ACP_LINES[1]],
+      ['H19',JP_ACP_LINES[2]],['H20',JP_ACP_LINES[3]],
+      ['H22','(10)Other references'],
+    ]
+    if(cntrCount) packPatches.push(['H23',cntrCount])
+    await patchSheet('Packing ',packPatches,['H15','H21',...(!cntrCount?['H23']:[])])
+
+    // 다운로드 (이미지/드로잉은 zip 내에서 원본 그대로 유지됨)
+    const out=await zip.generateAsync({type:'arraybuffer'})
+    const blob=new Blob([out],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})
     const a=document.createElement('a'); a.href=URL.createObjectURL(blob)
     a.download=`CI_PL_${invNo}_일본용.xlsx`; a.click()
   }
@@ -334,18 +365,22 @@ export default function ShipmentApp() {
   // ── 납품처 세관 양식 다운로드 ──────────────────────────────────────────
   async function downloadDelivery(type:'saitama'|'osaka', blNo:string){
     if(!blNo.trim()){ alert('B/L 번호를 입력해주세요'); return }
+    const {default:JSZip}=await import('jszip')
     const url=`/templates/delivery_${type==='saitama'?'SAITAMA':'OSAKA'}.xlsx`
     const res=await fetch(url)
     if(!res.ok){ alert('템플릿 파일을 불러올 수 없습니다'); return }
     const buf=await res.arrayBuffer()
-    const wb=XLSX.read(new Uint8Array(buf),{type:'array',cellStyles:true})
-    for(const sn of wb.SheetNames){
-      const ws=wb.Sheets[sn]
-      if(ws['B6']){ ws['B6'].v=blNo.trim(); ws['B6'].w=blNo.trim(); delete ws['B6'].f }
-      else ws['B6']={t:'s',v:blNo.trim(),w:blNo.trim()}
+    // JSZip으로 열기 → B6만 외과적으로 교체 → 정부 세관 양식 100% 원형 유지
+    const zip=await JSZip.loadAsync(buf)
+    const sheetMap=await getSheetFileMap(zip)
+    for(const path of sheetMap.values()){
+      const f=zip.file(path); if(!f) continue
+      let xml=await f.async('text')
+      xml=xmlSetCell(xml,'B6',blNo.trim())
+      zip.file(path,xml)
     }
-    const out=XLSX.write(wb,{bookType:'xlsx',type:'array',cellStyles:true})
-    const blob=new Blob([out as ArrayBuffer],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})
+    const out=await zip.generateAsync({type:'arraybuffer'})
+    const blob=new Blob([out],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})
     const a=document.createElement('a'); a.href=URL.createObjectURL(blob)
     a.download=`運送先一覧様式_${type.toUpperCase()}_${blNo.trim()}.xlsx`; a.click()
   }
