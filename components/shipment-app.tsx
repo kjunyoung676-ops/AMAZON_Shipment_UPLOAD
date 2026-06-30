@@ -275,9 +275,7 @@ export default function ShipmentApp() {
   const [dlBL_Osaka,setDlBL_Osaka]=useState('')
 
   // ── CI/PL 변환기 ────────────────────────────────────────────────────────
-  // 일본용 CI/PL 고정 상수
-  const JP_CONSIGNEE_LINES=['Homedant Co., Ltd. (CJ LOGISTICS JAPAN ON BEHALF OF)','367-26 Daegotbuk-ro, Daegot-myeon, ','Gimpo-si, Gyeonggi-do','SOUTH KOREA','+82 70-4157-3393','global@speedrack.kr']
-  const JP_ACP_LINES=['CJ LOGISTICS JAPAN CORP.','TOKYO TO MINATO KU NISHISHINBASHI 2-7-4 CJ BLDG.,7F','TEL : 03-3500-5842','ACP No. : 1000-25-0891']
+  // 관서(오사카) 통지처만 별도 상수 — 관동(사이타마)은 한국 Excel 수식에서 자동으로 가져옴
   const JP_NOTIFY_KANTO=['CJ LOGISTICS JAPAN CORP. HONSHA HM.BYUN','5F, 1662 Shimohayami, Kuki-shi, Saitama,','346-0022, Japan','TEL: 0335005842','keunje.park@cj.net']
   const JP_NOTIFY_KANSAI=['CJ LOGISTICS JAPAN OSAKA BRANCH','4F Prologis park 5, 8-4-47','Nankohigashi Suminoe-ku Osaka-city Osaka 559-0031 Japan','+81-6-6690-0217','Keunje Park, kj_park@jhss-jp.com']
 
@@ -303,57 +301,36 @@ export default function ShipmentApp() {
 
   async function downloadCipl(){
     if(!ciplWB||!ciplRawRef.current) return
-    // SheetJS로 파싱된 값에서 미리 읽기 (쓰기는 JSZip이 담당)
     const inv=ciplWB.Sheets['Invoice ']
     const pack=ciplWB.Sheets['Packing ']
     if(!inv||!pack){ alert('Invoice 또는 Packing 시트를 찾을 수 없습니다'); return }
-    const cntrCount=String(pack['H18']?.v||'')  // H18 덮기 전에 먼저 저장
-    const invNo=String(inv['H3']?.v||ciplFile?.name.replace('.xlsx','')||'JP')
-    const notify=ciplPort==='kanto'?JP_NOTIFY_KANTO:JP_NOTIFY_KANSAI
+    const invNo=String(inv['B3']?.v||ciplFile?.name.replace('.xlsx','')||'JP')
+    const isKansai=ciplPort==='kansai'
 
     // JSZip으로 원본 파일 열기 (이미지/서식/드로잉 100% 보존)
     const {default:JSZip}=await import('jszip')
     const zip=await JSZip.loadAsync(ciplRawRef.current)
     const sheetMap=await getSheetFileMap(zip)
 
-    async function patchSheet(name:string, patches:[string,string][], clears:string[]){
+    async function patchSheet(name:string, patches:[string,string][]){
       const path=sheetMap.get(name)
       if(!path){ console.warn(`시트 없음: "${name}"`); return }
       const f=zip.file(path); if(!f) return
       let xml=await f.async('text')
       for(const [cell,val] of patches) xml=xmlSetCell(xml,cell,val)
-      for(const cell of clears) xml=xmlClearCell(xml,cell)
       zip.file(path,xml)
     }
 
-    // Invoice 시트
-    await patchSheet('Invoice ',[
-      ['A8','global@speedrack.kr'],
-      ['A10',JP_CONSIGNEE_LINES[0]],['A11',JP_CONSIGNEE_LINES[1]],
-      ['A12',JP_CONSIGNEE_LINES[2]],['A13',JP_CONSIGNEE_LINES[3]],
-      ['A14',JP_CONSIGNEE_LINES[4]],['A15',JP_CONSIGNEE_LINES[5]],
-      ['H15','(10)ACP information'],
-      ['H16',JP_ACP_LINES[0]],['H17',JP_ACP_LINES[1]],
-      ['H18',JP_ACP_LINES[2]],['H19',JP_ACP_LINES[3]],
-      ['H20','(11)Country of Origin'],['H21','SOUTH KOREA'],
-      ['H22','(12)Terms of delivery and payment'],['H23','Shipping condition : CFR'],
-    ],[])
+    // Invoice: 수출자 이메일만 수정 (수하인·기타참고사항은 한국 Excel 수식에서 정확히 가져옴)
+    await patchSheet('Invoice ',[['A8','global@speedrack.kr']])
 
-    // Packing 시트
-    const packPatches:[string,string][]=[
-      ['A8','global@speedrack.kr'],
-      ['A10',JP_CONSIGNEE_LINES[0]],['A11',JP_CONSIGNEE_LINES[1]],
-      ['A12',JP_CONSIGNEE_LINES[2]],['A13',JP_CONSIGNEE_LINES[3]],
-      ['A14',JP_CONSIGNEE_LINES[4]],['A15',JP_CONSIGNEE_LINES[5]],
-      ['H10',notify[0]],['H11',notify[1]],['H12',notify[2]],
-      ['H13',notify[3]],['H14',notify[4]],
-      ['H16','(9)ACP information'],
-      ['H17',JP_ACP_LINES[0]],['H18',JP_ACP_LINES[1]],
-      ['H19',JP_ACP_LINES[2]],['H20',JP_ACP_LINES[3]],
-      ['H22','(10)Other references'],
-    ]
-    if(cntrCount) packPatches.push(['H23',cntrCount])
-    await patchSheet('Packing ',packPatches,['H15','H21',...(!cntrCount?['H23']:[])])
+    // Packing: 수출자 이메일 수정 + 관서 선택 시 통지처만 오사카 지점으로 교체
+    const packPatches:[string,string][]=[['A8','global@speedrack.kr']]
+    if(isKansai){
+      const n=JP_NOTIFY_KANSAI
+      packPatches.push(['B10',n[0]],['B11',n[1]],['B12',n[2]],['B13',n[3]],['B14',n[4]])
+    }
+    await patchSheet('Packing ',packPatches)
 
     // 다운로드 (이미지/드로잉은 zip 내에서 원본 그대로 유지됨)
     const out=await zip.generateAsync({type:'arraybuffer'})
@@ -2954,11 +2931,11 @@ ${ctnBlocks}
           {ciplWB&&(()=>{
             const inv=ciplWB.Sheets['Invoice ']
             if(!inv) return null
-            const invNo=String(inv['H3']?.v||'')
+            const invNo=String(inv['B3']?.v||'')
             const dept=inv['A17']?.v
             const deptStr=dept?(typeof dept==='number'?XLSX.SSF.format('yyyy-mm-dd',dept):String(dept)):''
             const from=String(inv['A20']?.v||'')
-            const to=String(inv['F20']?.v||'')
+            const to=String(inv['B20']?.v||'')
             const vessel=String(inv['A23']?.v||'')
             const total=inv['N37']?.v
             // 품목 수 카운트
@@ -2974,8 +2951,8 @@ ${ctnBlocks}
                   <span style={{color:"var(--color-text-tertiary)"}}>선박</span><span>{vessel}</span>
                   <span style={{color:"var(--color-text-tertiary)"}}>품목 수</span><span>{itemCount}종</span>
                   <span style={{color:"var(--color-text-tertiary)"}}>합계</span><span>US$ {total?.toLocaleString?.()??total}</span>
-                  <span style={{color:"var(--color-text-tertiary)"}}>수입자 (변환 후)</span><span style={{color:"var(--color-text-info)"}}>{JP_CONSIGNEE_LINES[0]}</span>
-                  <span style={{color:"var(--color-text-tertiary)"}}>통지처 (변환 후)</span><span style={{color:"var(--color-text-info)"}}>{(ciplPort==='kanto'?JP_NOTIFY_KANTO:JP_NOTIFY_KANSAI)[0]}</span>
+                  <span style={{color:"var(--color-text-tertiary)"}}>수하인</span><span style={{color:"var(--color-text-info)"}}>{String(inv['A10']?.v||'')}</span>
+                  <span style={{color:"var(--color-text-tertiary)"}}>통지처</span><span style={{color:"var(--color-text-info)"}}>{ciplPort==='kansai'?JP_NOTIFY_KANSAI[0]:String(ciplWB?.Sheets?.['Packing ']?.['B10']?.v||JP_NOTIFY_KANTO[0])}</span>
                 </div>
               </div>
             )
@@ -2990,7 +2967,7 @@ ${ctnBlocks}
           </div>
 
           <div style={{fontSize:11,color:"var(--color-text-tertiary)",borderTop:"0.5px solid var(--color-border-tertiary)",paddingTop:10}}>
-            변환 내용: Consignee → Homedant (CJ ON BEHALF OF) · ACP 정보 추가 · 원산지 SOUTH KOREA · {ciplPort==='kanto'?'통지처 SAITAMA':'통지처 OSAKA'} · 제품 데이터 그대로 유지
+            변환 내용: 수출자 이메일(global@speedrack.kr) 보정 · {ciplPort==='kanto'?'통지처 SAITAMA (수식 자동)':'통지처 OSAKA (교체)'} · 전자서명·서식 100% 유지
           </div>
         </div>
       )}
