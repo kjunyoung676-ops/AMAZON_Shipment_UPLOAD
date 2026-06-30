@@ -150,21 +150,35 @@ function forwardFill(rows:RowData[], masterRef?: Record<string,{loc:string}>):Ro
 function xlsDl(data:unknown[],sn:string,fn:string){const wb=XLSX.utils.book_new();const ws=Array.isArray(data[0])?XLSX.utils.aoa_to_sheet(data as unknown[][]):XLSX.utils.json_to_sheet(data as Record<string,unknown>[]);XLSX.utils.book_append_sheet(wb,ws,sn||"data");XLSX.writeFile(wb,fn)}
 
 // ── JSZip 외과적 XLSX 패치 헬퍼 (모듈 레벨) ─────────────────────────────
-// 특정 셀을 inline string으로 교체 (이미지/서식/드로잉 손대지 않음)
+function colLettersToNum(col:string):number{
+  let n=0; for(const c of col) n=n*26+(c.charCodeAt(0)-64); return n
+}
+// 특정 셀을 inline string으로 교체/삽입 (이미지/서식/드로잉 손대지 않음)
 function xmlSetCell(xml:string, cellRef:string, value:string):string{
   const esc=value.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
   const re=new RegExp(`<c\\s+r="${cellRef}"([^>]*)(?:/>|>[\\s\\S]*?</c>)`)
   if(re.test(xml)){
     return xml.replace(re,(_m,attrs)=>{
       const s=(attrs.match(/\bs="(\d+)"/)??[])[1]
-      return `<c r="${cellRef}"${s?` s="${s}"`:''}  t="inlineStr"><is><t>${esc}</t></is></c>`
+      return `<c r="${cellRef}"${s?` s="${s}"`:''} t="inlineStr"><is><t>${esc}</t></is></c>`
     })
   }
-  // 셀이 없으면 해당 행에 삽입
+  // 셀이 없으면 열 순서를 유지하며 행에 삽입
   const rowNum=(cellRef.match(/\d+/)??[])[0]
   if(!rowNum) return xml
-  const rowRe=new RegExp(`(<row[^>]+\\br="${rowNum}"[^>]*>)`)
-  if(rowRe.test(xml)) return xml.replace(rowRe,`$1<c r="${cellRef}" t="inlineStr"><is><t>${esc}</t></is></c>`)
+  const newColNum=colLettersToNum(cellRef.replace(/\d+/g,''))
+  const newCell=`<c r="${cellRef}" t="inlineStr"><is><t>${esc}</t></is></c>`
+  const rowRe=new RegExp(`(<row[^>]+\\br="${rowNum}"[^>]*>)([\\s\\S]*?)(</row>)`)
+  if(rowRe.test(xml)){
+    return xml.replace(rowRe,(_,open,content,close)=>{
+      const existRe=/<c r="([A-Z]+)\d+"/g; let m; let pos=content.length
+      existRe.lastIndex=0
+      while((m=existRe.exec(content))!==null){
+        if(colLettersToNum(m[1])>newColNum){pos=m.index;break}
+      }
+      return open+content.slice(0,pos)+newCell+content.slice(pos)+close
+    })
+  }
   return xml
 }
 function xmlClearCell(xml:string, cellRef:string):string{ return xmlSetCell(xml,cellRef,'') }
@@ -209,9 +223,12 @@ export default function ShipmentApp() {
     setBlPortMode(lsLoad(sheetKey(activeSheet,"blPortMode"),{}))
   },[activeSheet])
 
-  useEffect(()=>{if(activeSheet)lsSave(sheetKey(activeSheet,"s2meta"),s2meta)},[s2meta,activeSheet])
-  useEffect(()=>{if(activeSheet)lsSave(sheetKey(activeSheet,"ctnMeta"),ctnMeta)},[ctnMeta,activeSheet])
-  useEffect(()=>{if(activeSheet)lsSave(sheetKey(activeSheet,"pltNotes"),pltNotes)},[pltNotes,activeSheet])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(()=>{if(activeSheet)lsSave(sheetKey(activeSheet,"s2meta"),s2meta)},[s2meta])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(()=>{if(activeSheet)lsSave(sheetKey(activeSheet,"ctnMeta"),ctnMeta)},[ctnMeta])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(()=>{if(activeSheet)lsSave(sheetKey(activeSheet,"pltNotes"),pltNotes)},[pltNotes])
   const [coll,setColl]=useState<Record<string,boolean>>({})
   const [newSku,setNewSku]=useState({...EMPTY_SKU})
   const [fbaLoading,setFbaLoading]=useState(false)
@@ -275,7 +292,9 @@ export default function ShipmentApp() {
   const [dlBL_Osaka,setDlBL_Osaka]=useState('')
 
   // ── CI/PL 변환기 ────────────────────────────────────────────────────────
-  // 관서(오사카) 통지처만 별도 상수 — 관동(사이타마)은 한국 Excel 수식에서 자동으로 가져옴
+  // 일본용 고정값
+  const JP_CONSIGNEE=['Homedant Co., Ltd. (CJ LOGISTICS JAPAN ON BEHALF OF)','367-26 Daegotbuk-ro, Daegot-myeon,','Gimpo-si, Gyeonggi-do','SOUTH KOREA','+82 70-4157-3393','global@speedrack.kr']
+  const JP_ACP=['CJ LOGISTICS JAPAN CORP.','TOKYO TO MINATO KU NISHISHINBASHI 2-7-4 CJ BLDG.,7F','TEL : 03-3500-5842','ACP No. : 1000-25-0891']
   const JP_NOTIFY_KANTO=['CJ LOGISTICS JAPAN CORP. HONSHA HM.BYUN','5F, 1662 Shimohayami, Kuki-shi, Saitama,','346-0022, Japan','TEL: 0335005842','keunje.park@cj.net']
   const JP_NOTIFY_KANSAI=['CJ LOGISTICS JAPAN OSAKA BRANCH','4F Prologis park 5, 8-4-47','Nankohigashi Suminoe-ku Osaka-city Osaka 559-0031 Japan','+81-6-6690-0217','Keunje Park, kj_park@jhss-jp.com']
 
@@ -306,8 +325,9 @@ export default function ShipmentApp() {
     if(!inv||!pack){ alert('Invoice 또는 Packing 시트를 찾을 수 없습니다'); return }
     const invNo=String(inv['B3']?.v||ciplFile?.name.replace('.xlsx','')||'JP')
     const isKansai=ciplPort==='kansai'
+    // Packing A18 = 컨테이너 수 (패치 전에 미리 읽기)
+    const cntrCount=String(pack['A18']?.v||'')
 
-    // JSZip으로 원본 파일 열기 (이미지/서식/드로잉 100% 보존)
     const {default:JSZip}=await import('jszip')
     const zip=await JSZip.loadAsync(ciplRawRef.current)
     const sheetMap=await getSheetFileMap(zip)
@@ -321,18 +341,53 @@ export default function ShipmentApp() {
       zip.file(path,xml)
     }
 
-    // Invoice: 수출자 이메일만 수정 (수하인·기타참고사항은 한국 Excel 수식에서 정확히 가져옴)
-    await patchSheet('Invoice ',[['A8','global@speedrack.kr']])
+    // ── Invoice 시트 ─────────────────────────────────────────────────────
+    await patchSheet('Invoice ',[
+      // 수출자 이메일 보정
+      ['A8','global@speedrack.kr'],
+      // (2) Consignee → Homedant (CJ ON BEHALF OF)
+      ['A10',JP_CONSIGNEE[0]],['A11',JP_CONSIGNEE[1]],['A12',JP_CONSIGNEE[2]],
+      ['A13',JP_CONSIGNEE[3]],['A14',JP_CONSIGNEE[4]],['A15',JP_CONSIGNEE[5]],
+      // (9) Manufacturer information — 한국어 제거
+      ['B9','(9)Manufacturer information'],
+      // (10) ACP information
+      ['B15','(10)ACP information'],
+      ['B16',JP_ACP[0]],
+      ['B17',JP_ACP[1]],
+      ['A18',JP_ACP[2]],
+      ['G19','ACP No. : 1000-25-0891'],
+      // (11) Country of Origin
+      ['G20','(11)Country of Origin'],
+      ['A21','SOUTH KOREA'],
+      // (12) Terms of delivery
+      ['B22','(12)Terms of delivery and payment'],
+      ['B23','Shipping condition : DDP'],
+    ])
 
-    // Packing: 수출자 이메일 수정 + 관서 선택 시 통지처만 오사카 지점으로 교체
-    const packPatches:[string,string][]=[['A8','global@speedrack.kr']]
+    // ── Packing 시트 ──────────────────────────────────────────────────────
+    const packPatches:[string,string][]=[
+      // 수출자 이메일 보정
+      ['A8','global@speedrack.kr'],
+      // (2) Consignee → Homedant (CJ ON BEHALF OF)
+      ['A10',JP_CONSIGNEE[0]],['A11',JP_CONSIGNEE[1]],['A12',JP_CONSIGNEE[2]],
+      ['A13',JP_CONSIGNEE[3]],['A14',JP_CONSIGNEE[4]],['A15',JP_CONSIGNEE[5]],
+      // (9) ACP information
+      ['B16','(9)ACP information'],
+      ['B17',JP_ACP[0]],
+      ['A18',JP_ACP[1]],
+      ['G19',JP_ACP[2]],
+      ['G20',JP_ACP[3]],
+      // (10) Other references + 컨테이너 수
+      ['B22','(10)Other referencese'],
+      ['B23',cntrCount],
+    ]
+    // (8) Notify Party — 관서(KANSAI)만 오사카 지점으로 교체, 관동은 수식 그대로
     if(isKansai){
       const n=JP_NOTIFY_KANSAI
       packPatches.push(['B10',n[0]],['B11',n[1]],['B12',n[2]],['B13',n[3]],['B14',n[4]])
     }
     await patchSheet('Packing ',packPatches)
 
-    // 다운로드 (이미지/드로잉은 zip 내에서 원본 그대로 유지됨)
     const out=await zip.generateAsync({type:'arraybuffer'})
     const blob=new Blob([out],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})
     const a=document.createElement('a'); a.href=URL.createObjectURL(blob)
@@ -1626,7 +1681,7 @@ export default function ShipmentApp() {
                 <tr>{["약호","ASIN","구박스","신박스","카톤","PLT당카톤","팔레트","G.W(kg)","CBM"].map(h=><th key={h} style={TH}>{h}</th>)}{["FC CENTER","주소","FBA ID","아마존 ID"].map(h=><th key={h} style={{...TH,...IBLU}}>{h}</th>)}</tr>
               </thead>
               <tbody>
-                {s2rows.map((r,i)=>(<tr key={r.sku} style={{background:i%2===0?"transparent":"var(--color-background-secondary)"}}><td style={{...TD,fontWeight:500,minWidth:130}}>{r.sku}</td><td style={{...TD,fontFamily:"var(--font-mono)",fontSize:11,minWidth:100}}>{r.asin}</td><td style={{...TD,minWidth:45}}>{r.to}</td><td style={{...TD,color:"var(--color-text-info)",fontWeight:500,minWidth:70}}>{r.loc}</td><td style={{...TD,textAlign:"right",fontWeight:500,minWidth:55}}>{r.total.toLocaleString()}</td><td style={{...TD,textAlign:"center",minWidth:55}}>{r.cpp}</td><td style={{...TD,textAlign:"right",fontWeight:500,minWidth:50}}>{r.pallets}</td><td style={{...TD,textAlign:"right",minWidth:70,borderRight:"1px solid var(--color-border-tertiary)"}}>{r.gw.toFixed(1)}</td><td style={{...TD,textAlign:"right",minWidth:60,borderRight:"2px solid var(--color-border-secondary)"}}>{r.cbm}</td>{(["fc","address","fbaId","amazonId"] as const).map((f,idx)=>(<td key={f} style={{...TD,minWidth:[80,150,130,90][idx],...IBLU}}><input
+                {s2rows.map((r,i)=>{const isMfn=r.fc.trim().toUpperCase()==='MFN'; return (<tr key={r.sku} style={{background:isMfn?'rgba(254,226,226,0.45)':i%2===0?"transparent":"var(--color-background-secondary)"}}><td style={{...TD,fontWeight:500,minWidth:130}}>{r.sku}{isMfn&&<span style={{marginLeft:6,fontSize:10,padding:"1px 5px",borderRadius:3,background:"#fee2e2",color:"#dc2626",fontWeight:700,border:"0.5px solid #fca5a5",verticalAlign:"middle"}}>MFN</span>}</td><td style={{...TD,fontFamily:"var(--font-mono)",fontSize:11,minWidth:100}}>{r.asin}</td><td style={{...TD,minWidth:45}}>{r.to}</td><td style={{...TD,color:"var(--color-text-info)",fontWeight:500,minWidth:70}}>{r.loc}</td><td style={{...TD,textAlign:"right",fontWeight:500,minWidth:55}}>{r.total.toLocaleString()}</td><td style={{...TD,textAlign:"center",minWidth:55}}>{r.cpp}</td><td style={{...TD,textAlign:"right",fontWeight:500,minWidth:50}}>{r.pallets}</td><td style={{...TD,textAlign:"right",minWidth:70,borderRight:"1px solid var(--color-border-tertiary)"}}>{r.gw.toFixed(1)}</td><td style={{...TD,textAlign:"right",minWidth:60,borderRight:"2px solid var(--color-border-secondary)"}}>{r.cbm}</td>{(["fc","address","fbaId","amazonId"] as const).map((f,idx)=>(<td key={f} style={{...TD,minWidth:[80,150,130,90][idx],...IBLU}}><input
                   value={r[f]}
                   onChange={e=>updMeta(r.sku,f,e.target.value)}
                   onPaste={e=>{
@@ -1643,7 +1698,8 @@ export default function ShipmentApp() {
                   }}
                   style={INP}
                   placeholder={["FC CENTER","주소","FBA ID","아마존 ID"][idx]}
-                /></td>))}</tr>))}
+                /></td>))}</tr>)})}
+
               </tbody>
               <tfoot><tr style={{background:"var(--color-background-secondary)",borderTop:"2px solid var(--color-border-secondary)"}}><td colSpan={4} style={{...TD,fontWeight:500,textAlign:"right"}}>합계</td><td style={{...TD,fontWeight:500,textAlign:"right"}}>{totC.toLocaleString()}</td><td style={TD}></td><td style={{...TD,fontWeight:500,textAlign:"right"}}>{totP}</td><td style={{...TD,fontWeight:500,textAlign:"right"}}>{totW.toFixed(1)}</td><td style={{...TD,fontWeight:500,textAlign:"right"}}>{totCBM}</td><td colSpan={4} style={TD}></td></tr></tfoot>
             </table>
@@ -1707,8 +1763,9 @@ export default function ShipmentApp() {
                     const hasData = s2qty > 0
                     const isOk = diff === 0
                     const sheets = Math.ceil(labelQty/6)
-                    return(<tr key={loc} style={{background:i%2===0?"transparent":"var(--color-background-secondary)"}}>
-                      <td style={{...TD,fontWeight:500}}>{locLabel(loc)}</td>
+                    const isMfn = s2rows.some(r=>r.loc===loc && r.fc.trim().toUpperCase()==='MFN')
+                    return(<tr key={loc} style={{background:isMfn?'rgba(254,226,226,0.35)':i%2===0?"transparent":"var(--color-background-secondary)"}}>
+                      <td style={{...TD,fontWeight:500}}>{locLabel(loc)}{isMfn&&<span style={{marginLeft:6,fontSize:10,padding:"1px 5px",borderRadius:3,background:"#fee2e2",color:"#dc2626",fontWeight:700,border:"0.5px solid #fca5a5",verticalAlign:"middle"}}>MFN</span>}</td>
                       <td style={{...TD,textAlign:"right",fontWeight:500}}>{labelQty.toLocaleString()}장</td>
                       <td style={{...TD,textAlign:"right",color:"var(--color-text-secondary)"}}>{hasData?s2qty.toLocaleString()+"개":"—"}</td>
                       <td style={{...TD,textAlign:"right",fontWeight:500,color:!hasData?"var(--color-text-tertiary)":isOk?"var(--color-text-success)":Math.abs(diff)<=3?"#f59e0b":"var(--color-text-danger)"}}>
@@ -1907,8 +1964,8 @@ export default function ShipmentApp() {
           const totalQty = ctnGroups.reduce((s,g)=>s+g.rows.reduce((s2,r)=>s2+r.qty,0),0)
           const totalPlt = ctnGroups.reduce((s,g)=>s+g.rows.reduce((s2,r)=>s2+r.pallets,0),0)
 
-          const FC_BG: Record<string,string> = { HIY1:'#1e3a8a', TPB5:'#14532d', VJNB:'#78350f', TPB8:'#6b21a8' }
-          const FC_ROW: Record<string,string> = { HIY1:'#dbeafe', TPB5:'#dcfce7', VJNB:'#fef9c3', TPB8:'#f3e8ff' }
+          const FC_BG: Record<string,string> = { HIY1:'#1e3a8a', TPB5:'#14532d', VJNB:'#78350f', TPB8:'#6b21a8', MFN:'#7c2d12' }
+          const FC_ROW: Record<string,string> = { HIY1:'#dbeafe', TPB5:'#dcfce7', VJNB:'#fef9c3', TPB8:'#f3e8ff', MFN:'#fef2f2' }
 
           // 자연스럽게 흐르는 레이아웃 — break-inside:avoid로 찢기지 않게
           const ctnBlocks = ctnGroups.map((g) => {
@@ -2183,8 +2240,8 @@ ${ctnBlocks}
         const blIds = [...new Set(fd.map(r => String(r.booking_ref || r.destination || r.container_no || 'BL1')))]
 
         function expS3B() {
-          const hdr = [['NO','상품명(ASIN号)','ASIN No.','약호','신박스코드','UNIT(PCS)','G.W(KG)','판매가격(JPY)','FBA배송료(JPY)','BL']]
-          const body = allBLRows.map(r => [r.no, `${r.sku} ${r.asin}`, r.asin, r.sku, r.loc, r.qty, r.gw, r.price ? `¥${r.price.toLocaleString()}` : '', r.fba ? `¥${r.fba.toLocaleString()}` : '', r.blId])
+          const hdr = [['NO','상품명(ASIN号)','ASIN No.','약호','신박스코드','UNIT(PCS)','G.W(KG)','판매가격(¥JPY)','FBA배송료(¥JPY)','BL']]
+          const body = allBLRows.map(r => [r.no, `${r.sku} ${r.asin}`, r.asin, r.sku, r.loc, r.qty, r.gw, r.price || '', r.fba || '', r.blId])
           xlsDl([...hdr, ...body], '역산시트', '역산시트_' + new Date().toISOString().slice(0,10) + '.xlsx')
         }
 
@@ -2546,7 +2603,7 @@ ${ctnBlocks}
             etd: String(f0.etd||''  ),
             eta: String(f0.eta||''  ),
             pod,
-            blNo: String(f0.booking_ref||''  ),
+            blNo: '',
             cntrNo: String(meta.container||''  ),
             teu,
             products: skuList.map(([sku])=>sku).join('\n'),
@@ -2608,7 +2665,7 @@ ${ctnBlocks}
                           <td style={{...TD,minWidth:80,fontSize:11,color:"var(--color-text-info)",fontWeight:500,whiteSpace:"pre-line",lineHeight:"1.6"}}>{r.boxCodes}</td>
                           <td style={{...TD,textAlign:"right",fontWeight:500}}>{r.plt}</td>
                           <td style={{...TD,textAlign:"right"}}>{r.ctn.toLocaleString()}</td>
-                          <td style={{...TD,color:"var(--color-text-info)",fontWeight:500}}>{r.fc}</td>
+                          <td style={{...TD}}>{r.fc.toUpperCase().includes('MFN')?<span style={{padding:"2px 7px",borderRadius:4,background:"#fee2e2",color:"#dc2626",fontWeight:700,fontSize:11,border:"0.5px solid #fca5a5"}}>MFN</span>:<span style={{color:"var(--color-text-info)",fontWeight:500}}>{r.fc}</span>}</td>
                         </tr>
                       )
                     })}</tbody>
@@ -2911,7 +2968,7 @@ ${ctnBlocks}
 
           {/* 파일 업로드 */}
           <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-            <div onClick={()=>ciplRef.current?.click()} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 16px",border:"1px dashed var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",cursor:"pointer",fontSize:13}}>
+            <div onClick={()=>ciplRef.current?.click()} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();const f=e.dataTransfer.files[0];if(f)loadCiplFile(f)}} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 16px",border:"1px dashed var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",cursor:"pointer",fontSize:13}}>
               <span>+</span>
               <span style={{color:ciplFile?"var(--color-text-primary)":"var(--color-text-tertiary)"}}>{ciplFile?ciplFile.name:"한국용 CI/PL Excel 업로드 (.xlsx)"}</span>
             </div>
@@ -2931,6 +2988,7 @@ ${ctnBlocks}
           {ciplWB&&(()=>{
             const inv=ciplWB.Sheets['Invoice ']
             if(!inv) return null
+            const pack=ciplWB.Sheets['Packing ']
             const invNo=String(inv['B3']?.v||'')
             const dept=inv['A17']?.v
             const deptStr=dept?(typeof dept==='number'?XLSX.SSF.format('yyyy-mm-dd',dept):String(dept)):''
@@ -2941,6 +2999,15 @@ ${ctnBlocks}
             // 품목 수 카운트
             let itemCount=0; let r=27
             while(inv[`E${r}`]?.v){ itemCount++; r++ }
+            // Total case (총 케이스): Packing 시트 총합 행에서 정수값 탐색
+            let totalCase: number|undefined
+            if(pack){
+              const totalRow=r  // Invoice와 동일한 행번호 가정
+              for(const col of ['E','F','G','H','I','J','K','L']){
+                const v=pack[`${col}${totalRow}`]?.v
+                if(typeof v==='number' && v>0 && Math.abs(v-Math.round(v))<0.01){ totalCase=Math.round(v); break }
+              }
+            }
             return(
               <div style={{background:"var(--color-background-secondary)",borderRadius:8,padding:"12px 16px",fontSize:12,display:"flex",flexDirection:"column",gap:6}}>
                 <div style={{fontWeight:600,marginBottom:4,fontSize:13}}>파싱 결과 미리보기</div>
@@ -2950,9 +3017,10 @@ ${ctnBlocks}
                   <span style={{color:"var(--color-text-tertiary)"}}>From → To</span><span>{from} → {to}</span>
                   <span style={{color:"var(--color-text-tertiary)"}}>선박</span><span>{vessel}</span>
                   <span style={{color:"var(--color-text-tertiary)"}}>품목 수</span><span>{itemCount}종</span>
+                  {totalCase!==undefined&&<><span style={{color:"var(--color-text-tertiary)"}}>Total case</span><span style={{fontWeight:600}}>{totalCase.toLocaleString()}</span></>}
                   <span style={{color:"var(--color-text-tertiary)"}}>합계</span><span>US$ {total?.toLocaleString?.()??total}</span>
-                  <span style={{color:"var(--color-text-tertiary)"}}>수하인</span><span style={{color:"var(--color-text-info)"}}>{String(inv['A10']?.v||'')}</span>
-                  <span style={{color:"var(--color-text-tertiary)"}}>통지처</span><span style={{color:"var(--color-text-info)"}}>{ciplPort==='kansai'?JP_NOTIFY_KANSAI[0]:String(ciplWB?.Sheets?.['Packing ']?.['B10']?.v||JP_NOTIFY_KANTO[0])}</span>
+                  <span style={{color:"var(--color-text-tertiary)"}}>수하인 (변환 후)</span><span style={{color:"var(--color-text-info)"}}>{JP_CONSIGNEE[0]}</span>
+                  <span style={{color:"var(--color-text-tertiary)"}}>통지처 (변환 후)</span><span style={{color:"var(--color-text-info)"}}>{ciplPort==='kansai'?JP_NOTIFY_KANSAI[0]:JP_NOTIFY_KANTO[0]}</span>
                 </div>
               </div>
             )
@@ -2967,7 +3035,7 @@ ${ctnBlocks}
           </div>
 
           <div style={{fontSize:11,color:"var(--color-text-tertiary)",borderTop:"0.5px solid var(--color-border-tertiary)",paddingTop:10}}>
-            변환 내용: 수출자 이메일(global@speedrack.kr) 보정 · {ciplPort==='kanto'?'통지처 SAITAMA (수식 자동)':'통지처 OSAKA (교체)'} · 전자서명·서식 100% 유지
+            변환 내용: Consignee→Homedant(CJ ON BEHALF OF) · ACP정보 추가 · {ciplPort==='kanto'?'통지처 SAITAMA':'통지처 OSAKA'} · Terms DDP · 전자서명·서식 유지
           </div>
         </div>
       )}
