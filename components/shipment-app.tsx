@@ -154,9 +154,11 @@ function colLettersToNum(col:string):number{
   let n=0; for(const c of col) n=n*26+(c.charCodeAt(0)-64); return n
 }
 // 특정 셀을 inline string으로 교체/삽입 (이미지/서식/드로잉 손대지 않음)
+// lookahead로 r= 속성 위치 무관 매칭 — greedy 먹힘 버그 없음
 function xmlSetCell(xml:string, cellRef:string, value:string):string{
   const esc=value.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-  const re=new RegExp(`<c\\s+r="${cellRef}"([^>]*)(?:/>|>[\\s\\S]*?</c>)`)
+  // (?=[^>]*\br="CELLREF"\b) : 태그 내 어느 위치의 r= 도 탐지 (lookahead, 소비하지 않음)
+  const re=new RegExp(`<c(?=[^>]*\\br="${cellRef}"\\b)([^>]*)(?:/>|>[\\s\\S]*?</c>)`)
   if(re.test(xml)){
     return xml.replace(re,(_m,attrs)=>{
       const s=(attrs.match(/\bs="(\d+)"/)??[])[1]
@@ -171,7 +173,8 @@ function xmlSetCell(xml:string, cellRef:string, value:string):string{
   const rowRe=new RegExp(`(<row[^>]+\\br="${rowNum}"[^>]*>)([\\s\\S]*?)(</row>)`)
   if(rowRe.test(xml)){
     return xml.replace(rowRe,(_,open,content,close)=>{
-      const existRe=/<c r="([A-Z]+)\d+"/g; let m; let pos=content.length
+      // <c\b[^>]*\br="COL+digits" — backtrack으로 r= 속성 위치 무관 추출, m.index=<c 위치
+      const existRe=/<c\b[^>]*\br="([A-Z]+)\d+"/g; let m; let pos=content.length
       existRe.lastIndex=0
       while((m=existRe.exec(content))!==null){
         if(colLettersToNum(m[1])>newColNum){pos=m.index;break}
@@ -388,6 +391,8 @@ export default function ShipmentApp() {
     }
     await patchSheet('Packing ',packPatches)
 
+    // calcChain.xml 제거: 수식→인라인 문자열 교체 후 불일치로 Excel 복구 메시지 방지
+    zip.remove('xl/calcChain.xml')
     const out=await zip.generateAsync({type:'arraybuffer'})
     const blob=new Blob([out],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})
     const a=document.createElement('a'); a.href=URL.createObjectURL(blob)
