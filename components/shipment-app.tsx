@@ -227,6 +227,129 @@ export default function ShipmentApp() {
   useEffect(()=>{lsSave(LS_KEY+'_totalExcl',[...totalExcludedSheets])},[totalExcludedSheets])
   useEffect(()=>{lsSave(LS_KEY+'_totalAdj',totalAdjustments)},[totalAdjustments])
 
+  // ── CI/PL 변환기 상태 ────────────────────────────────────────────────────
+  const [ciplFile,setCiplFile]=useState<File|null>(null)
+  const [ciplWB,setCiplWB]=useState<XLSX.WorkBook|null>(null)
+  const [ciplPort,setCiplPort]=useState<'kanto'|'kansai'>('kanto')
+  const ciplRef=useRef<HTMLInputElement>(null)
+
+  // ── 납품처 정보 상태 ─────────────────────────────────────────────────────
+  const [dlBL_Saitama,setDlBL_Saitama]=useState('')
+  const [dlBL_Osaka,setDlBL_Osaka]=useState('')
+
+  // ── CI/PL 변환기 ────────────────────────────────────────────────────────
+  // 일본용 CI/PL 고정 상수
+  const JP_CONSIGNEE_LINES=['Homedant Co., Ltd. (CJ LOGISTICS JAPAN ON BEHALF OF)','367-26 Daegotbuk-ro, Daegot-myeon, ','Gimpo-si, Gyeonggi-do','SOUTH KOREA','+82 70-4157-3393','global@speedrack.kr']
+  const JP_ACP_LINES=['CJ LOGISTICS JAPAN CORP.','TOKYO TO MINATO KU NISHISHINBASHI 2-7-4 CJ BLDG.,7F','TEL : 03-3500-5842','ACP No. : 1000-25-0891']
+  const JP_NOTIFY_KANTO=['CJ LOGISTICS JAPAN CORP. HONSHA HM.BYUN','5F, 1662 Shimohayami, Kuki-shi, Saitama,','346-0022, Japan','TEL: 0335005842','keunje.park@cj.net']
+  const JP_NOTIFY_KANSAI=['CJ LOGISTICS JAPAN OSAKA BRANCH','4F Prologis park 5, 8-4-47','Nankohigashi Suminoe-ku Osaka-city Osaka 559-0031 Japan','+81-6-6690-0217','Keunje Park, kj_park@jhss-jp.com']
+
+  function setCiplCell(ws:XLSX.WorkSheet, addr:string, v:string){
+    if(!ws[addr]) ws[addr]={t:'s',v,w:v}
+    else{ ws[addr].v=v; ws[addr].w=v; delete ws[addr].f }
+  }
+  function clearCiplCell(ws:XLSX.WorkSheet, addr:string){
+    if(ws[addr]){ ws[addr].v=''; ws[addr].w=''; delete ws[addr].f }
+  }
+
+  function loadCiplFile(f:File){
+    setCiplFile(f)
+    const reader=new FileReader()
+    reader.onload=e=>{
+      const data=new Uint8Array(e.target!.result as ArrayBuffer)
+      const wb=XLSX.read(data,{type:'array',cellStyles:true,cellFormula:true})
+      setCiplWB(wb)
+    }
+    reader.readAsArrayBuffer(f)
+  }
+
+  function downloadCipl(){
+    if(!ciplWB) return
+    // 원본 workbook 클론 (수식+스타일 보존)
+    const rawBytes=XLSX.write(ciplWB,{bookType:'xlsx',type:'array',cellStyles:true}) as Uint8Array
+    const wb2=XLSX.read(rawBytes,{type:'array',cellStyles:true,cellFormula:true})
+    const inv=wb2.Sheets['Invoice ']
+    const pack=wb2.Sheets['Packing ']
+    if(!inv||!pack){ alert('Invoice 또는 Packing 시트를 찾을 수 없습니다'); return }
+
+    const invNo=String(inv['H3']?.v||ciplFile?.name.replace('.xlsx','')||'JP')
+    const notify=ciplPort==='kanto'?JP_NOTIFY_KANTO:JP_NOTIFY_KANSAI
+
+    // ── Invoice 시트 변환 ──
+    // Consignee (A8, A10-A15): 수출자 이름 → 이메일, 수입자 → Homedant 자기 주소
+    setCiplCell(inv,'A8','global@speedrack.kr')
+    setCiplCell(inv,'A10',JP_CONSIGNEE_LINES[0])
+    setCiplCell(inv,'A11',JP_CONSIGNEE_LINES[1])
+    setCiplCell(inv,'A12',JP_CONSIGNEE_LINES[2])
+    setCiplCell(inv,'A13',JP_CONSIGNEE_LINES[3])
+    setCiplCell(inv,'A14',JP_CONSIGNEE_LINES[4])
+    setCiplCell(inv,'A15',JP_CONSIGNEE_LINES[5])
+    // 우측 헤더: H15 Other references → ACP info + Country of Origin + Terms
+    setCiplCell(inv,'H15','(10)ACP information')
+    setCiplCell(inv,'H16',JP_ACP_LINES[0])
+    setCiplCell(inv,'H17',JP_ACP_LINES[1])
+    setCiplCell(inv,'H18',JP_ACP_LINES[2])
+    setCiplCell(inv,'H19',JP_ACP_LINES[3])
+    setCiplCell(inv,'H20','(11)Country of Origin')
+    setCiplCell(inv,'H21','SOUTH KOREA')
+    setCiplCell(inv,'H22','(12)Terms of delivery and payment')
+    setCiplCell(inv,'H23','Shipping condition : CFR')
+
+    // ── Packing 시트 변환 ──
+    // 컨테이너 수 (한국판 H18에 있음 — ACP info 덮기 전에 먼저 저장)
+    const cntrCount=String(pack['H18']?.v||'')
+    setCiplCell(pack,'A8','global@speedrack.kr')
+    setCiplCell(pack,'A10',JP_CONSIGNEE_LINES[0])
+    setCiplCell(pack,'A11',JP_CONSIGNEE_LINES[1])
+    setCiplCell(pack,'A12',JP_CONSIGNEE_LINES[2])
+    setCiplCell(pack,'A13',JP_CONSIGNEE_LINES[3])
+    setCiplCell(pack,'A14',JP_CONSIGNEE_LINES[4])
+    setCiplCell(pack,'A15',JP_CONSIGNEE_LINES[5])
+    // Notify Party (H10-H14)
+    setCiplCell(pack,'H10',notify[0])
+    setCiplCell(pack,'H11',notify[1])
+    setCiplCell(pack,'H12',notify[2])
+    setCiplCell(pack,'H13',notify[3])
+    setCiplCell(pack,'H14',notify[4])
+    clearCiplCell(pack,'H15')
+    // ACP info (H16-H20)
+    setCiplCell(pack,'H16','(9)ACP information')
+    setCiplCell(pack,'H17',JP_ACP_LINES[0])
+    setCiplCell(pack,'H18',JP_ACP_LINES[1])
+    setCiplCell(pack,'H19',JP_ACP_LINES[2])
+    setCiplCell(pack,'H20',JP_ACP_LINES[3])
+    clearCiplCell(pack,'H21')
+    // Other references → H22-H23
+    setCiplCell(pack,'H22','(10)Other references')
+    if(cntrCount) setCiplCell(pack,'H23',cntrCount)
+    else clearCiplCell(pack,'H23')
+
+    // 다운로드
+    const outBytes=XLSX.write(wb2,{bookType:'xlsx',type:'array',cellStyles:true}) as Uint8Array
+    const blob=new Blob([outBytes],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob)
+    a.download=`CI_PL_${invNo}_일본용.xlsx`; a.click()
+  }
+
+  // ── 납품처 세관 양식 다운로드 ──────────────────────────────────────────
+  async function downloadDelivery(type:'saitama'|'osaka', blNo:string){
+    if(!blNo.trim()){ alert('B/L 번호를 입력해주세요'); return }
+    const url=`/templates/delivery_${type==='saitama'?'SAITAMA':'OSAKA'}.xlsx`
+    const res=await fetch(url)
+    if(!res.ok){ alert('템플릿 파일을 불러올 수 없습니다'); return }
+    const buf=await res.arrayBuffer()
+    const wb=XLSX.read(new Uint8Array(buf),{type:'array',cellStyles:true})
+    for(const sn of wb.SheetNames){
+      const ws=wb.Sheets[sn]
+      if(ws['B6']){ ws['B6'].v=blNo.trim(); ws['B6'].w=blNo.trim(); delete ws['B6'].f }
+      else ws['B6']={t:'s',v:blNo.trim(),w:blNo.trim()}
+    }
+    const out=XLSX.write(wb,{bookType:'xlsx',type:'array',cellStyles:true})
+    const blob=new Blob([out as ArrayBuffer],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob)
+    a.download=`運送先一覧様式_${type.toUpperCase()}_${blNo.trim()}.xlsx`; a.click()
+  }
+
   // ── 변동값 JSON 내보내기 — 모든 시트 전체 포함 ──────────────
   function exportMetaJson() {
     // localStorage에 저장된 모든 시트 키를 스캔해서 전부 백업
@@ -1352,26 +1475,37 @@ export default function ShipmentApp() {
   const totC=s2rows.reduce((s,r)=>s+r.total,0),totP=s2rows.reduce((s,r)=>s+r.pallets,0),totW=s2rows.reduce((s,r)=>s+r.gw,0),totCBM=Math.round(s2rows.reduce((s,r)=>s+r.cbm,0)*100)/100
 
   function NavBtn({m,label}:{m:string,label:string}){
-    const active=mode===m,avail=m==='1'||m==='map'||m==='label'||m==='logistics'||m==='s3b'||m==='cj'||m==='fba-api'||m==='total'||!!file
+    const active=mode===m,avail=m==='1'||m==='map'||m==='label'||m==='logistics'||m==='s3b'||m==='cj'||m==='fba-api'||m==='total'||m==='cipl'||m==='delivery'||!!file
     return(<button onClick={()=>avail&&setMode(m)} style={{padding:"8px 16px",fontSize:12,fontWeight:active?500:400,cursor:avail?"pointer":"default",border:"none",background:active?"var(--color-text-primary)":"transparent",color:active?"var(--color-background-primary)":avail?"var(--color-text-secondary)":"var(--color-text-tertiary)"}}>{label}</button>)
   }
 
   return (
     <div style={{padding:"0.75rem 0",fontFamily:"var(--font-sans)"}}>
       {/* 내비 */}
-      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:16}}>
-        <div style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",overflow:"hidden",display:"flex"}}>
-          <NavBtn m="1" label="1. 업로드"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
-          <NavBtn m="2" label="2. 1차 가공 (준비)"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
-          <NavBtn m="cj" label="1.5. CJ 출고"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
-          <NavBtn m="label" label="2. 라벨 분류"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
-          <NavBtn m="logistics" label="2-5. 물류 전달"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
-          <NavBtn m="3" label="3. 2차 가공 (적재)"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
-          <NavBtn m="s3b" label="3. 3차 가공 (역산)"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
-          <NavBtn m="fba-api" label="🚀 FBA 자동 등록"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
-          <NavBtn m="total" label="📊 총합"/>
+      <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:16}}>
+        {/* 메인 워크플로우 */}
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <div style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",overflow:"hidden",display:"flex"}}>
+            <NavBtn m="1" label="1. 업로드"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
+            <NavBtn m="2" label="1차 가공 (전품목 합산 정리)"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
+            <NavBtn m="cj" label="1.5. CJ 출고"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
+            <NavBtn m="label" label="2. 라벨 분류"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
+            <NavBtn m="logistics" label="2-5. 물류 전달"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
+            <NavBtn m="3" label="2차 가공 (CJ컨정보 전달)"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
+            <NavBtn m="fba-api" label="🚀 FBA 자동 등록"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
+            <NavBtn m="total" label="📊 총합"/>
+          </div>
+          <button onClick={()=>setMode('map')} style={{marginLeft:"auto",fontSize:11,padding:"6px 14px",background:mode==='map'?"var(--color-background-secondary)":"transparent",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",cursor:"pointer",color:mode==='map'?"var(--color-text-primary)":"var(--color-text-secondary)"}}>매핑 관리</button>
         </div>
-        <button onClick={()=>setMode('map')} style={{marginLeft:"auto",fontSize:11,padding:"6px 14px",background:mode==='map'?"var(--color-background-secondary)":"transparent",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",cursor:"pointer",color:mode==='map'?"var(--color-text-primary)":"var(--color-text-secondary)"}}>매핑 관리</button>
+        {/* 선적서류 섹션 */}
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:11,fontWeight:600,color:"var(--color-text-tertiary)",whiteSpace:"nowrap",letterSpacing:"0.04em"}}>선적서류</span>
+          <div style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",overflow:"hidden",display:"flex"}}>
+            <NavBtn m="s3b" label="역산시트"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
+            <NavBtn m="cipl" label="CI/PL 변환기"/><div style={{width:"0.5px",background:"var(--color-border-tertiary)"}}/>
+            <NavBtn m="delivery" label="납품처 정보"/>
+          </div>
+        </div>
       </div>
 
       {/* ══ STEP 1 ══ */}
@@ -2752,6 +2886,134 @@ ${ctnBlocks}
               </div>
             </>)
           })()}
+        </div>
+      )}
+
+      {/* ══ CI/PL 변환기 ══ */}
+      {mode==='cipl'&&(
+        <div style={{padding:"16px 0",display:"flex",flexDirection:"column",gap:16}}>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <span style={{fontSize:13,fontWeight:600,color:"var(--color-text-primary)"}}>CI/PL 변환기</span>
+            <span style={{fontSize:11,color:"var(--color-text-tertiary)"}}>한국용 오더짜기 Excel → 일본용 CI/PL 변환</span>
+          </div>
+
+          {/* 파일 업로드 */}
+          <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+            <div onClick={()=>ciplRef.current?.click()} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 16px",border:"1px dashed var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",cursor:"pointer",fontSize:13}}>
+              <span>+</span>
+              <span style={{color:ciplFile?"var(--color-text-primary)":"var(--color-text-tertiary)"}}>{ciplFile?ciplFile.name:"한국용 CI/PL Excel 업로드 (.xlsx)"}</span>
+            </div>
+            <input ref={ciplRef} type="file" accept=".xlsx" style={{display:"none"}} onChange={e=>e.target.files?.[0]&&loadCiplFile(e.target.files[0])}/>
+            {ciplWB&&<span style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:"rgba(22,163,74,0.1)",border:"0.5px solid #16a34a",color:"#16a34a"}}>✓ 파싱 완료</span>}
+          </div>
+
+          {/* 항구 선택 */}
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <span style={{fontSize:12,color:"var(--color-text-secondary)",fontWeight:600}}>CJ 수입 담당 지점</span>
+            {([['kanto','관동 (SAITAMA / 도쿄)'],['kansai','관서 (OSAKA)']] as const).map(([k,l])=>(
+              <button key={k} onClick={()=>setCiplPort(k)} style={{padding:"5px 14px",fontSize:12,borderRadius:6,cursor:"pointer",border:`1px solid ${ciplPort===k?"var(--color-border-info)":"var(--color-border-tertiary)"}`,background:ciplPort===k?"var(--color-background-info)":"transparent",color:ciplPort===k?"var(--color-text-info)":"var(--color-text-secondary)",fontWeight:ciplPort===k?600:400}}>{l}</button>
+            ))}
+          </div>
+
+          {/* 변환 미리보기 */}
+          {ciplWB&&(()=>{
+            const inv=ciplWB.Sheets['Invoice ']
+            if(!inv) return null
+            const invNo=String(inv['H3']?.v||'')
+            const dept=inv['A17']?.v
+            const deptStr=dept?(typeof dept==='number'?XLSX.SSF.format('yyyy-mm-dd',dept):String(dept)):''
+            const from=String(inv['A20']?.v||'')
+            const to=String(inv['F20']?.v||'')
+            const vessel=String(inv['A23']?.v||'')
+            const total=inv['N37']?.v
+            // 품목 수 카운트
+            let itemCount=0; let r=27
+            while(inv[`E${r}`]?.v){ itemCount++; r++ }
+            return(
+              <div style={{background:"var(--color-background-secondary)",borderRadius:8,padding:"12px 16px",fontSize:12,display:"flex",flexDirection:"column",gap:6}}>
+                <div style={{fontWeight:600,marginBottom:4,fontSize:13}}>파싱 결과 미리보기</div>
+                <div style={{display:"grid",gridTemplateColumns:"auto 1fr",gap:"3px 16px"}}>
+                  <span style={{color:"var(--color-text-tertiary)"}}>Invoice No.</span><span>{invNo}</span>
+                  <span style={{color:"var(--color-text-tertiary)"}}>출항일</span><span>{deptStr}</span>
+                  <span style={{color:"var(--color-text-tertiary)"}}>From → To</span><span>{from} → {to}</span>
+                  <span style={{color:"var(--color-text-tertiary)"}}>선박</span><span>{vessel}</span>
+                  <span style={{color:"var(--color-text-tertiary)"}}>품목 수</span><span>{itemCount}종</span>
+                  <span style={{color:"var(--color-text-tertiary)"}}>합계</span><span>US$ {total?.toLocaleString?.()??total}</span>
+                  <span style={{color:"var(--color-text-tertiary)"}}>수입자 (변환 후)</span><span style={{color:"var(--color-text-info)"}}>{JP_CONSIGNEE_LINES[0]}</span>
+                  <span style={{color:"var(--color-text-tertiary)"}}>통지처 (변환 후)</span><span style={{color:"var(--color-text-info)"}}>{(ciplPort==='kanto'?JP_NOTIFY_KANTO:JP_NOTIFY_KANSAI)[0]}</span>
+                </div>
+              </div>
+            )
+          })()}
+
+          {/* 다운로드 버튼 */}
+          <div>
+            <button onClick={downloadCipl} disabled={!ciplWB} style={{padding:"8px 22px",fontSize:13,fontWeight:600,cursor:ciplWB?"pointer":"not-allowed",border:"0.5px solid #16a34a",borderRadius:6,background:ciplWB?"rgba(22,163,74,0.1)":"var(--color-background-secondary)",color:ciplWB?"#16a34a":"var(--color-text-tertiary)"}}>
+              ⬇ 일본용 CI/PL Excel 다운로드
+            </button>
+            <span style={{fontSize:11,color:"var(--color-text-tertiary)",marginLeft:12}}>Invoice + Packing 시트 포함</span>
+          </div>
+
+          <div style={{fontSize:11,color:"var(--color-text-tertiary)",borderTop:"0.5px solid var(--color-border-tertiary)",paddingTop:10}}>
+            변환 내용: Consignee → Homedant (CJ ON BEHALF OF) · ACP 정보 추가 · 원산지 SOUTH KOREA · {ciplPort==='kanto'?'통지처 SAITAMA':'통지처 OSAKA'} · 제품 데이터 그대로 유지
+          </div>
+        </div>
+      )}
+
+      {/* ══ 납품처 정보 ══ */}
+      {mode==='delivery'&&(
+        <div style={{padding:"16px 0",display:"flex",flexDirection:"column",gap:20}}>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <span style={{fontSize:13,fontWeight:600,color:"var(--color-text-primary)"}}>납품처 정보 자동 작성</span>
+            <span style={{fontSize:11,color:"var(--color-text-tertiary)"}}>세관 운송선 일람표 (輸入申告に係る運送先一覧表) — B/L 번호만 입력</span>
+          </div>
+
+          {/* 1차가공 FC 현황 */}
+          {(()=>{
+            const s2rows=buildS2rows()
+            const usedFCs=[...new Set(s2rows.map(r=>r.fc).filter(Boolean))]
+            if(!usedFCs.length) return(
+              <div style={{fontSize:12,color:"var(--color-text-tertiary)"}}>1차가공에서 FC 정보를 입력하면 여기에 표시됩니다</div>
+            )
+            return(
+              <div style={{background:"var(--color-background-secondary)",borderRadius:8,padding:"10px 14px",fontSize:12}}>
+                <div style={{fontWeight:600,marginBottom:6}}>현재 1차가공 FC 현황</div>
+                <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                  {usedFCs.map(fc=>{
+                    const addr=s2rows.find(r=>r.fc===fc)?.address||''
+                    return(<span key={fc} style={{padding:"3px 10px",borderRadius:20,background:"rgba(6,182,212,0.1)",border:"0.5px solid #0891b2",color:"#0891b2",fontSize:11}}>{fc}{addr?` — ${addr.slice(0,30)}`:''}</span>)
+                  })}
+                </div>
+              </div>
+            )
+          })()}
+
+          {/* 세관 양식 섹션 */}
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            {([['saitama','SAITAMA (관동)','埼玉 / 東京 행',dlBL_Saitama,setDlBL_Saitama],['osaka','OSAKA (관서)','大阪 행',dlBL_Osaka,setDlBL_Osaka]] as const).map(([type,label,hint,bl,setBL])=>(
+              <div key={type} style={{display:"flex",alignItems:"center",gap:10,padding:"12px 16px",border:"0.5px solid var(--color-border-tertiary)",borderRadius:8,flexWrap:"wrap"}}>
+                <span style={{fontSize:12,fontWeight:600,minWidth:130,color:"var(--color-text-primary)"}}>{label}</span>
+                <span style={{fontSize:11,color:"var(--color-text-tertiary)",minWidth:80}}>{hint}</span>
+                <input
+                  type="text"
+                  placeholder="B/L 번호 입력 (예: COKR26007992)"
+                  value={bl}
+                  onChange={e=>setBL(e.target.value)}
+                  style={{fontSize:12,padding:"5px 10px",border:"0.5px solid var(--color-border-secondary)",borderRadius:4,background:"var(--color-background-primary)",color:"var(--color-text-primary)",outline:"none",width:240,fontFamily:"inherit"}}
+                />
+                <button
+                  onClick={()=>downloadDelivery(type,bl)}
+                  disabled={!bl.trim()}
+                  style={{padding:"6px 16px",fontSize:12,fontWeight:600,cursor:bl.trim()?"pointer":"not-allowed",border:"0.5px solid #16a34a",borderRadius:6,background:bl.trim()?"rgba(22,163,74,0.1)":"var(--color-background-secondary)",color:bl.trim()?"#16a34a":"var(--color-text-tertiary)"}}>
+                  ⬇ 다운로드
+                </button>
+              </div>
+            ))}
+          </div>
+
+          <div style={{fontSize:11,color:"var(--color-text-tertiary)",borderTop:"0.5px solid var(--color-border-tertiary)",paddingTop:10}}>
+            세관 정부 양식 원본 형식 그대로 유지 · B/L 번호만 입력됨 · 和文住所用 + 英文住所用 두 시트 모두 적용
+          </div>
         </div>
       )}
     </div>
