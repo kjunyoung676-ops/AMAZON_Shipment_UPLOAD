@@ -2199,7 +2199,7 @@ ${ctnBlocks}
         // BL별로 약호+수량 합산 → 역산시트 행 생성
 
         // BL 그룹핑
-        type BLRow = { no: number; blId: string; sku: string; asin: string; loc: string; qty: number; gw: number; price: number; fba: number }
+        type BLRow = { no: number; blId: string; sku: string; asin: string; loc: string; qty: number; gw: number; price: number; fba: number; mfn: boolean }
         const blGroups: Record<string, { rows: BLRow[]; blId: string }> = {}
         let rowNo = 0
 
@@ -2225,6 +2225,7 @@ ${ctnBlocks}
         for (const [blId, skuMap] of Object.entries(blAgg)) {
           for (const [sku, { qty, gw, pallets }] of Object.entries(skuMap)) {
             const m = master[sku] || {} as MasterItem
+            const isMfn = (s2meta[sku]?.fc || '').trim().toUpperCase() === 'MFN'
             rowNo++
             allBLRows.push({
               no: rowNo,
@@ -2235,7 +2236,8 @@ ${ctnBlocks}
               qty,
               gw: Math.round(gw * 10) / 10,
               price: parseFloat(String(m.price)) || 0,
-              fba: parseFloat(String(m.fba)) || 0,
+              fba: isMfn ? 0 : parseFloat(String(m.fba)) || 0,
+              mfn: isMfn,
             })
           }
           blNo++
@@ -2246,7 +2248,7 @@ ${ctnBlocks}
 
         function expS3B() {
           const hdr = [['NO','상품명(ASIN号)','ASIN No.','약호','신박스코드','UNIT(PCS)','G.W(KG)','판매가격(¥JPY)','FBA배송료(¥JPY)','BL']]
-          const body = allBLRows.map(r => [r.no, `${r.sku} ${r.asin}`, r.asin, r.sku, r.loc, r.qty, r.gw, r.price || '', r.fba || '', r.blId])
+          const body = allBLRows.map(r => [r.no, `${r.sku} ${r.asin}`, r.asin, r.sku, r.loc, r.qty, r.gw, r.price || '', r.mfn ? 0 : (r.fba || ''), r.blId])
           xlsDl([...hdr, ...body], '역산시트', '역산시트_' + new Date().toISOString().slice(0,10) + '.xlsx')
         }
 
