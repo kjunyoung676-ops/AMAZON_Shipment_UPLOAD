@@ -213,6 +213,8 @@ export default function ShipmentApp() {
   const [s2meta,setS2meta]=useState<Record<string,Record<string,string>>>({})
   const [ctnMeta,setCtnMeta]=useState<Record<number,Record<string,string>>>({})
   const [pltNotes,setPltNotes]=useState<Record<string,string>>({})
+  // G.W/CBM 수동 보정값(PL PDF 업로드 또는 직접 수정) — key: `${container_no}_${sku}`, 해당 시트(BL)에만 적용, master 미변경
+  const [gwCbmOverride,setGwCbmOverride]=useState<Record<string,{gw?:number,cbm?:number}>>({})
   // BL별 입항지 선택: key=blId, value='kansai'|'kanto'
   const [blPortMode,setBlPortMode]=useState<Record<string,string>>(()=>lsLoad(LS_KEY+"_blPortMode",{}))
   useEffect(()=>{if(activeSheet)lsSave(sheetKey(activeSheet,"blPortMode"),blPortMode)},[blPortMode,activeSheet])
@@ -224,6 +226,7 @@ export default function ShipmentApp() {
     setCtnMeta(lsLoad(sheetKey(activeSheet,"ctnMeta"),{}))
     setPltNotes(lsLoad(sheetKey(activeSheet,"pltNotes"),{}))
     setBlPortMode(lsLoad(sheetKey(activeSheet,"blPortMode"),{}))
+    setGwCbmOverride(lsLoad(sheetKey(activeSheet,"gwCbmOverride"),{}))
   },[activeSheet])
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -232,6 +235,8 @@ export default function ShipmentApp() {
   useEffect(()=>{if(activeSheet)lsSave(sheetKey(activeSheet,"ctnMeta"),ctnMeta)},[ctnMeta])
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(()=>{if(activeSheet)lsSave(sheetKey(activeSheet,"pltNotes"),pltNotes)},[pltNotes])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(()=>{if(activeSheet)lsSave(sheetKey(activeSheet,"gwCbmOverride"),gwCbmOverride)},[gwCbmOverride])
   const [coll,setColl]=useState<Record<string,boolean>>({})
   const [newSku,setNewSku]=useState({...EMPTY_SKU})
   const [fbaLoading,setFbaLoading]=useState(false)
@@ -710,6 +715,61 @@ export default function ShipmentApp() {
     return ordered.map(sku=>({sku,total:agg[sku]||0,adj:totalAdjustments[sku]||0,final:(agg[sku]||0)+(totalAdjustments[sku]||0)})).filter(r=>r.total>0||r.adj!==0)
   }
   function buildS3groups(){return ctnNums.map(no=>{const rows=fd.filter(r=>r.container_no===no);const f0=rows[0]||{};const cm=ctnMeta[no]||{};return {no,container:cm.container||"",sealNo:cm.sealNo||"",shipment_date:String(f0.shipment_date||""),shipment_time:String(f0.shipment_time||""),destination:String(f0.destination||""),etd:String(f0.etd||""),eta:String(f0.eta||""),rows}})}
+  // G.W/CBM 유효값: PL PDF 업로드/수동 보정값이 있으면 그것을, 없으면 매핑관리 기준 자동계산값을 사용 (해당 시트에만 적용, master 불변)
+  function gwCbmKey(containerNo:number, sku:string){ return `${containerNo}_${sku}` }
+  function rowGW(r:RowData):number{
+    const sku=String(r.sku||''); const ov=gwCbmOverride[gwCbmKey(r.container_no as number,sku)]
+    if(ov?.gw!==undefined) return ov.gw
+    const m=master[sku]||({} as MasterItem)
+    return calcGW(r.quantity,parseFloat(String(m.kg))||0)
+  }
+  function rowCBM(r:RowData):number{
+    const sku=String(r.sku||''); const ov=gwCbmOverride[gwCbmKey(r.container_no as number,sku)]
+    if(ov?.cbm!==undefined) return ov.cbm
+    const m=master[sku]||({} as MasterItem)
+    return calcCBM(r.quantity,parseFloat(String(m.bx))||0,parseFloat(String(m.by))||0,parseFloat(String(m.bz))||0)
+  }
+  function setGwOverride(containerNo:number, sku:string, v:number|undefined){
+    const key=gwCbmKey(containerNo,sku)
+    setGwCbmOverride(prev=>({...prev,[key]:{...prev[key],gw:v}}))
+  }
+  function setCbmOverride(containerNo:number, sku:string, v:number|undefined){
+    const key=gwCbmKey(containerNo,sku)
+    setGwCbmOverride(prev=>({...prev,[key]:{...prev[key],cbm:v}}))
+  }
+  // PL PDF에서 텍스트 추출 → 약호(SKU) 매칭 라인의 G.W/CBM 숫자를 읽어 해당 컨테이너에만 자동 반영
+  async function parsePlPdfAndApply(f:File, containerNo:number, rows:RowData[]){
+    const pdfjs=await import('pdfjs-dist')
+    pdfjs.GlobalWorkerOptions.workerSrc=new URL('pdfjs-dist/build/pdf.worker.min.mjs',import.meta.url).toString()
+    const buf=await f.arrayBuffer()
+    const doc=await pdfjs.getDocument({data:buf}).promise
+    let text=''
+    for(let p=1;p<=doc.numPages;p++){
+      const page=await doc.getPage(p)
+      const content=await page.getTextContent()
+      text += content.items.map((it)=>('str' in it ? it.str : '')).join(' ') + '\n'
+    }
+    const skusInCtn=[...new Set(rows.map(r=>String(r.sku||'')).filter(Boolean))]
+    const lines=text.split('\n')
+    let matched=0
+    for(const sku of skusInCtn){
+      // 실제 상품 SKU(정확 표기)도 함께 탐색 — master[sku].sku 필드
+      const realSku=(master[sku]||{} as MasterItem).sku||''
+      const lineIdx=lines.findIndex(l=>l.includes(sku)||(realSku&&l.includes(realSku)))
+      if(lineIdx===-1)continue
+      // 같은 줄 또는 다음 줄까지 포함해 숫자 토큰 수집 (KGS/CBM 표기 무관)
+      const scanText=lines[lineIdx]+' '+(lines[lineIdx+1]||'')
+      const nums=[...scanText.matchAll(/\d[\d,]*\.?\d*/g)].map(m=>parseFloat(m[0].replace(/,/g,''))).filter(n=>!isNaN(n)&&n>0)
+      if(nums.length<2)continue
+      // 관례: 뒤에서 두 번째=G.W(KG), 마지막=CBM (PL 표 컬럼 순서상 N.W, G.W, CBM 순으로 끝나는 경우가 많음)
+      const cbm=nums[nums.length-1]
+      const gw=nums[nums.length-2]
+      if(gw>0 && gw<100000) setGwOverride(containerNo,sku,gw)
+      if(cbm>0 && cbm<1000) setCbmOverride(containerNo,sku,cbm)
+      matched++
+    }
+    return matched
+  }
   const updM=(sku:string,f:string,v:string|number)=>setMaster(p=>({...p,[sku]:{...(p[sku]||{}),[f]:v} as MasterItem}))
   const updMeta=(sku:string,f:string,v:string)=>setS2meta(p=>({...p,[sku]:{...(p[sku]||{}),[f]:v}}))
   const updCtnMeta=(no:number,f:string,v:string)=>setCtnMeta(p=>({...p,[no]:{...(p[no]||{}),[f]:v}}))
@@ -727,7 +787,7 @@ export default function ShipmentApp() {
   }
   function expS1(){xlsDl(fd.map(r=>({시트:activeSheet,컨:"컨"+r.container_no,출항일:r.shipment_date||"",목적지:r.destination||"",BOM품번:r.model_code||"",품목:r.sku||"",색상:r.color||"",수량:r.quantity,TYPE구:r.type_old||"",TYPE신:r.location||"",ETD:r.etd||"",ETA:r.eta||""})),activeSheet||"S1","1단계_"+(activeSheet||"data")+".xlsx")}
   function expS2(){const rows=buildS2rows();const hdr=[["약호","ASIN","구박스","신박스","카톤","PLT당카톤","팔레트","G.W(kg)","CBM","FC CENTER","주소","FBA ID","아마존 ID"]];const body=rows.map(r=>[r.sku,r.asin,r.to,r.loc,r.total,r.cpp,r.pallets,r.gw,r.cbm,r.fc,r.address,r.fbaId,r.amazonId]);const tC=rows.reduce((s,r)=>s+r.total,0),tP=rows.reduce((s,r)=>s+r.pallets,0),tW=rows.reduce((s,r)=>s+r.gw,0),tB=Math.round(rows.reduce((s,r)=>s+r.cbm,0)*100)/100;xlsDl([...hdr,...body,["합계","","","",tC,"",tP,tW,tB]],activeSheet||"S2","1차가공_"+(activeSheet||"data")+".xlsx")}
-  function expS3(){const hdr=[["CONTAINER","SEAL NO.","약호","BOX CODE","ASIN","FBA ID","아마존 ID","FC CENTER","주소","PLT","CT","CTN/PLT","G.W(kg)","CBM"]];const body:unknown[][]=[];for(const g of buildS3groups()){let first=true;for(const r of g.rows){const m=master[String(r.sku)]||({} as MasterItem);const cpp=parseFloat(String(m.cpp))||16;const sk=s2meta[String(r.sku)]||{};body.push([first?g.container:"",first?g.sealNo:"",r.sku,r.location||m.loc||"",m.asin||"",sk.fbaId||"",sk.amazonId||"",sk.fc||"",first?(sk.address||""):"",Math.ceil(r.quantity/cpp),r.quantity,cpp+"CTN/PLT",calcGW(r.quantity,parseFloat(String(m.kg))||0),calcCBM(r.quantity,parseFloat(String(m.bx))||0,parseFloat(String(m.by))||0,parseFloat(String(m.bz))||0)]);first=false}};xlsDl([...hdr,...body],activeSheet||"S3","2차가공_"+(activeSheet||"data")+".xlsx")}
+  function expS3(){const hdr=[["CONTAINER","SEAL NO.","약호","BOX CODE","ASIN","FBA ID","아마존 ID","FC CENTER","주소","PLT","CT","CTN/PLT","G.W(kg)","CBM"]];const body:unknown[][]=[];for(const g of buildS3groups()){let first=true;for(const r of g.rows){const m=master[String(r.sku)]||({} as MasterItem);const cpp=parseFloat(String(m.cpp))||16;const sk=s2meta[String(r.sku)]||{};body.push([first?g.container:"",first?g.sealNo:"",r.sku,r.location||m.loc||"",m.asin||"",sk.fbaId||"",sk.amazonId||"",sk.fc||"",first?(sk.address||""):"",Math.ceil(r.quantity/cpp),r.quantity,cpp+"CTN/PLT",rowGW(r),rowCBM(r)]);first=false}};xlsDl([...hdr,...body],activeSheet||"S3","2차가공_"+(activeSheet||"data")+".xlsx")}
 
   async function expFbaUpload(ctnFilter?: number[]){
     setFbaLoading(true)
@@ -2165,7 +2225,7 @@ ${ctnBlocks}
       {/* ══ STEP 3 ══ */}
       {mode==='3'&&(
         <div>
-          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}><span style={{fontSize:12,color:"var(--color-text-secondary)"}}>업로드 컨테이너별 분류 · CONTAINER/SEAL 직접 입력</span><button onClick={expS3} style={{marginLeft:"auto",fontSize:11,padding:"3px 10px"}}>xlsx 저장</button></div>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}><span style={{fontSize:12,color:"var(--color-text-secondary)"}}>업로드 컨테이너별 분류 · CONTAINER/SEAL 직접 입력 · G.W/CBM은 PL PDF 업로드 또는 직접 수정 가능(해당 시트에만 적용)</span><button onClick={expS3} style={{marginLeft:"auto",fontSize:11,padding:"3px 10px"}}>xlsx 저장</button></div>
           <SheetTabs/>
           {!file?(<p style={{color:"var(--color-text-tertiary)",fontSize:13,textAlign:"center",padding:"3rem 0"}}>파일을 먼저 업로드해주세요</p>):(
             <div style={{overflowX:"auto",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)"}}>
@@ -2176,15 +2236,20 @@ ${ctnBlocks}
                     const rows=g.rows,ci=(g.no-1)%CB.length
                     const sumQ=rows.reduce((s,r)=>s+r.quantity,0)
                     const sumP=rows.reduce((s,r)=>{const cpp=parseFloat(String((master[String(r.sku)]||{}).cpp))||16;return s+Math.ceil(r.quantity/cpp)},0)
-                    const sumW=rows.reduce((s,r)=>s+calcGW(r.quantity,parseFloat(String((master[String(r.sku)]||{}).kg))||0),0)
-                    const sumCBM=Math.round(rows.reduce((s,r)=>{const m=master[String(r.sku)]||({} as MasterItem);return s+calcCBM(r.quantity,parseFloat(String(m.bx))||0,parseFloat(String(m.by))||0,parseFloat(String(m.bz))||0)},0)*100)/100
-                    return[...rows.map((r,i)=>{const m=master[String(r.sku)]||({} as MasterItem);const cpp=parseFloat(String(m.cpp))||16;const sk=s2meta[String(r.sku)]||{};const gw=calcGW(r.quantity,parseFloat(String(m.kg))||0);const cbm=calcCBM(r.quantity,parseFloat(String(m.bx))||0,parseFloat(String(m.by))||0,parseFloat(String(m.bz))||0);return(<tr key={g.no+"_"+i} style={{background:i%2===0?"transparent":"var(--color-background-secondary)"}}>
+                    const sumW=rows.reduce((s,r)=>s+rowGW(r),0)
+                    const sumCBM=Math.round(rows.reduce((s,r)=>s+rowCBM(r),0)*100)/100
+                    return[...rows.map((r,i)=>{const m=master[String(r.sku)]||({} as MasterItem);const cpp=parseFloat(String(m.cpp))||16;const sk=s2meta[String(r.sku)]||{};const sku=String(r.sku);const ov=gwCbmOverride[gwCbmKey(g.no,sku)];const gw=rowGW(r);const cbm=rowCBM(r);const gwOv=ov?.gw!==undefined,cbmOv=ov?.cbm!==undefined;return(<tr key={g.no+"_"+i} style={{background:i%2===0?"transparent":"var(--color-background-secondary)"}}>
                       {i===0&&(<><td rowSpan={rows.length+1} style={{...TD,verticalAlign:"middle",textAlign:"center",background:CB[ci],padding:"6px 8px",borderRight:"0.5px solid var(--color-border-tertiary)"}}><div style={{fontSize:10,color:CT[ci],opacity:0.7,marginBottom:3}}>컨{g.no}</div><input value={ctnMeta[g.no]?.container||""} onChange={e=>updCtnMeta(g.no,"container",e.target.value)} placeholder="CONTAINER" style={{...INP,textAlign:"center",fontWeight:500,fontSize:11,color:CT[ci],borderBottom:"1px solid "+CT[ci]+"66",width:88}}/></td><td rowSpan={rows.length+1} style={{...TD,verticalAlign:"middle",textAlign:"center",background:CB[ci],padding:"6px 8px",borderRight:"2px solid var(--color-border-secondary)"}}><input value={ctnMeta[g.no]?.sealNo||""} onChange={e=>updCtnMeta(g.no,"sealNo",e.target.value)} placeholder="SEAL NO." style={{...INP,textAlign:"center",fontSize:11,color:CT[ci],borderBottom:"1px solid "+CT[ci]+"66",width:78}}/></td></>)}
-                      <td style={{...TD,fontWeight:500,minWidth:130}}>{String(r.sku)}</td><td style={{...TD,color:"var(--color-text-info)",fontWeight:500,minWidth:70}}>{String(r.location||m.loc||"")}</td><td style={{...TD,fontFamily:"var(--font-mono)",fontSize:11,minWidth:100}}>{m.asin||""}</td><td style={{...TD,fontFamily:"var(--font-mono)",fontSize:11,minWidth:110}}>{sk.fbaId||""}</td><td style={{...TD,fontFamily:"var(--font-mono)",fontSize:11,minWidth:90}}>{sk.amazonId||""}</td><td style={{...TD,fontWeight:500,minWidth:70}}>{sk.fc||""}</td><td style={{...TD,textAlign:"right",minWidth:40}}>{Math.ceil(r.quantity/cpp)}</td><td style={{...TD,textAlign:"right",fontWeight:500,minWidth:40}}>{r.quantity.toLocaleString()}</td><td style={{...TD,textAlign:"center",color:"var(--color-text-secondary)"}}>{cpp}CTN/PLT</td><td style={{...TD,textAlign:"right",color:"var(--color-text-secondary)"}}>{gw.toFixed(1)}</td><td style={{...TD,textAlign:"right",color:"var(--color-text-secondary)"}}>{cbm}</td>
+                      <td style={{...TD,fontWeight:500,minWidth:130}}>{String(r.sku)}</td><td style={{...TD,color:"var(--color-text-info)",fontWeight:500,minWidth:70}}>{String(r.location||m.loc||"")}</td><td style={{...TD,fontFamily:"var(--font-mono)",fontSize:11,minWidth:100}}>{m.asin||""}</td><td style={{...TD,fontFamily:"var(--font-mono)",fontSize:11,minWidth:110}}>{sk.fbaId||""}</td><td style={{...TD,fontFamily:"var(--font-mono)",fontSize:11,minWidth:90}}>{sk.amazonId||""}</td><td style={{...TD,fontWeight:500,minWidth:70}}>{sk.fc||""}</td><td style={{...TD,textAlign:"right",minWidth:40}}>{Math.ceil(r.quantity/cpp)}</td><td style={{...TD,textAlign:"right",fontWeight:500,minWidth:40}}>{r.quantity.toLocaleString()}</td><td style={{...TD,textAlign:"center",color:"var(--color-text-secondary)"}}>{cpp}CTN/PLT</td>
+                      <td style={{...TD,...(gwOv?IBLU:{}),padding:"2px 6px",minWidth:74}}><input type="number" step="0.1" value={gw} onChange={e=>{const v=e.target.value;setGwOverride(g.no,sku,v===""?undefined:parseFloat(v))}} title={gwOv?"PDF/수동 보정값 (지우면 자동계산으로 복귀)":"자동계산값 — 수정하면 이 시트에만 보정 적용"} style={{...INP,textAlign:"right",color:gwOv?"var(--color-text-info)":"var(--color-text-secondary)",fontWeight:gwOv?600:400}}/></td>
+                      <td style={{...TD,...(cbmOv?IBLU:{}),padding:"2px 6px",minWidth:64}}><input type="number" step="0.01" value={cbm} onChange={e=>{const v=e.target.value;setCbmOverride(g.no,sku,v===""?undefined:parseFloat(v))}} title={cbmOv?"PDF/수동 보정값 (지우면 자동계산으로 복귀)":"자동계산값 — 수정하면 이 시트에만 보정 적용"} style={{...INP,textAlign:"right",color:cbmOv?"var(--color-text-info)":"var(--color-text-secondary)",fontWeight:cbmOv?600:400}}/></td>
                     </tr>)}),
-                    <tr key={"sub_"+g.no} style={{background:CB[ci],borderTop:"1px solid "+CT[ci]+"44"}}><td colSpan={6} style={{...TD,color:CT[ci],fontWeight:500,textAlign:"right",fontSize:11}}>{(g.container||"컨"+g.no)+" 소계"}{g.shipment_date?" · "+g.shipment_date:""}{g.destination?"  "+g.destination:""}{g.etd?"  ETD "+g.etd:""}</td><td style={{...TD,color:CT[ci],fontWeight:500,textAlign:"right"}}>{sumP}</td><td style={{...TD,color:CT[ci],fontWeight:500,textAlign:"right"}}>{sumQ.toLocaleString()}</td><td style={TD}></td><td style={{...TD,color:CT[ci],fontWeight:500,textAlign:"right"}}>{sumW.toFixed(1)}</td><td style={{...TD,color:CT[ci],fontWeight:500,textAlign:"right"}}>{sumCBM}</td></tr>]
+                    <tr key={"sub_"+g.no} style={{background:CB[ci],borderTop:"1px solid "+CT[ci]+"44"}}><td colSpan={6} style={{...TD,color:CT[ci],fontWeight:500,textAlign:"right",fontSize:11}}>{(g.container||"컨"+g.no)+" 소계"}{g.shipment_date?" · "+g.shipment_date:""}{g.destination?"  "+g.destination:""}{g.etd?"  ETD "+g.etd:""}</td><td style={{...TD,color:CT[ci],fontWeight:500,textAlign:"right"}}>{sumP}</td><td style={{...TD,color:CT[ci],fontWeight:500,textAlign:"right"}}>{sumQ.toLocaleString()}</td><td style={{...TD,textAlign:"center"}}>
+                      <input type="file" accept=".pdf,application/pdf" id={`pl-pdf-${g.no}`} style={{display:"none"}} onChange={async e=>{const f=e.target.files?.[0];if(!f)return;const n=await parsePlPdfAndApply(f,g.no,g.rows);alert(n>0?`PL PDF에서 ${n}개 약호의 G.W/CBM을 반영했습니다. 값을 확인 후 필요시 직접 수정하세요.`:'약호와 일치하는 항목을 PDF에서 찾지 못했습니다. G.W/CBM을 직접 입력해주세요.');e.target.value=''}}/>
+                      <label htmlFor={`pl-pdf-${g.no}`} style={{fontSize:10,padding:"2px 6px",borderRadius:4,border:"0.5px solid "+CT[ci]+"66",color:CT[ci],cursor:"pointer",whiteSpace:"nowrap"}}>📄 PL PDF</label>
+                    </td><td style={{...TD,color:CT[ci],fontWeight:500,textAlign:"right"}}>{sumW.toFixed(1)}</td><td style={{...TD,color:CT[ci],fontWeight:500,textAlign:"right"}}>{sumCBM}</td></tr>]
                   })}
-                  {(()=>{const gC=fd.reduce((s,r)=>s+r.quantity,0);const gP=fd.reduce((s,r)=>{const cpp=parseFloat(String((master[String(r.sku)]||{}).cpp))||16;return s+Math.ceil(r.quantity/cpp)},0);const gW=fd.reduce((s,r)=>s+calcGW(r.quantity,parseFloat(String((master[String(r.sku)]||{}).kg))||0),0);const gCBM=Math.round(fd.reduce((s,r)=>{const m=master[String(r.sku)]||({} as MasterItem);return s+calcCBM(r.quantity,parseFloat(String(m.bx))||0,parseFloat(String(m.by))||0,parseFloat(String(m.bz))||0)},0)*100)/100;return(<tr style={{background:"var(--color-background-secondary)",borderTop:"2px solid var(--color-border-secondary)"}}><td colSpan={8} style={{...TD,fontWeight:500,textAlign:"right"}}>전체 합계</td><td style={{...TD,fontWeight:500,textAlign:"right"}}>{gP}</td><td style={{...TD,fontWeight:500,textAlign:"right"}}>{gC.toLocaleString()}</td><td style={TD}></td><td style={{...TD,fontWeight:500,textAlign:"right"}}>{gW.toFixed(1)}</td><td style={{...TD,fontWeight:500,textAlign:"right"}}>{gCBM}</td></tr>)})()}
+                  {(()=>{const gC=fd.reduce((s,r)=>s+r.quantity,0);const gP=fd.reduce((s,r)=>{const cpp=parseFloat(String((master[String(r.sku)]||{}).cpp))||16;return s+Math.ceil(r.quantity/cpp)},0);const gW=fd.reduce((s,r)=>s+rowGW(r),0);const gCBM=Math.round(fd.reduce((s,r)=>s+rowCBM(r),0)*100)/100;return(<tr style={{background:"var(--color-background-secondary)",borderTop:"2px solid var(--color-border-secondary)"}}><td colSpan={8} style={{...TD,fontWeight:500,textAlign:"right"}}>전체 합계</td><td style={{...TD,fontWeight:500,textAlign:"right"}}>{gP}</td><td style={{...TD,fontWeight:500,textAlign:"right"}}>{gC.toLocaleString()}</td><td style={TD}></td><td style={{...TD,fontWeight:500,textAlign:"right"}}>{gW.toFixed(1)}</td><td style={{...TD,fontWeight:500,textAlign:"right"}}>{gCBM}</td></tr>)})()}
                 </tbody>
               </table>
             </div>
@@ -2214,8 +2279,8 @@ ${ctnBlocks}
           const m = master[sku] || {} as MasterItem
           const cpp = parseFloat(String(m.cpp)) || 16
           blAgg[blId][sku].qty += r.quantity
-          // 행별 calcGW 누적 (합산 후 calcGW 금지)
-          blAgg[blId][sku].gw += calcGW(r.quantity, parseFloat(String(m.kg)) || 0)
+          // 행별 GW 누적 (합산 후 계산 금지) — PL PDF/수동 보정값이 있으면 그 값을 사용 (해당 시트에만 적용)
+          blAgg[blId][sku].gw += rowGW(r)
           blAgg[blId][sku].pallets += Math.ceil(r.quantity / cpp)
         }
 
