@@ -2288,9 +2288,11 @@ ${ctnBlocks}
         const blGroups: Record<string, { rows: BLRow[]; blId: string }> = {}
         let rowNo = 0
 
-        // fd에서 BL 기준으로 집계
+        // 2차 가공(buildS3groups)이 만든 "컨테이너+약호당 1행" 병합 데이터를 그대로 사용 — 원본 fd를 다시 집계하지 않음
+        // (raw fd로 다시 돌면 한 컨테이너 안에 같은 약호가 여러 줄로 쪼개져 있을 때 보정값이 줄 수만큼 중복 합산됨)
+        const s3MergedRows = buildS3groups().flatMap(g => g.rows)
         const blAgg: Record<string, Record<string, { qty: number; blId: string; gw: number; pallets: number }>> = {}
-        for (const r of fd) {
+        for (const r of s3MergedRows) {
           const sku = String(r.sku || '')
           if (!sku) continue
           const blId = String(r.booking_ref || r.destination || r.container_no || 'BL1')
@@ -2299,7 +2301,7 @@ ${ctnBlocks}
           const m = master[sku] || {} as MasterItem
           const cpp = parseFloat(String(m.cpp)) || 16
           blAgg[blId][sku].qty += r.quantity
-          // 행별 GW 누적 (합산 후 계산 금지) — PL PDF/수동 보정값이 있으면 그 값을 사용 (해당 시트에만 적용)
+          // 컨테이너+약호당 1번만 더함 — 2차 가공 화면에 보이는 G.W와 항상 일치
           blAgg[blId][sku].gw += rowGW(r)
           blAgg[blId][sku].pallets += Math.ceil(r.quantity / cpp)
         }
